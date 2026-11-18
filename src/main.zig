@@ -47,6 +47,10 @@ const Scene = struct {
         const scissor = if (area.scissor) |sc| s.window_renderer.scaled(sc) else null;
         const aspect = @as(f32, @floatFromInt(vp.width)) / @as(f32, @floatFromInt(@max(vp.height, 1)));
         const m = g.camera.viewProjection(aspect);
+        if (g.view_jumped) {
+            s.renderer.makeAllNow();
+            g.view_jumped = false;
+        }
         // The units and buildings in view, and the marks on the ground.
         var b: mesh.Builder = .{ .out = s.renderer.dynamicVertices() };
         for (g.world.things[0..g.world.count], 0..) |*t, i| {

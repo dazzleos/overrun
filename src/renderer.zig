@@ -70,7 +70,7 @@ pub fn Renderer(comptime Device: type) type {
         /// Where a chunk's triangles are made, before they go to the GPU.
         scratch: []Vertex,
         /// Every chunk in view made, however many (the first frame, and
-        /// after the view jumps).
+        /// after the view jumps: see `makeAllNow`).
         all_now: bool = true,
         /// The units' and buildings' vertices, two buffers in turn (one may
         /// still be being drawn while the next is made).
@@ -105,6 +105,12 @@ pub fn Renderer(comptime Device: type) type {
             r.gpa.free(r.scratch);
             for (r.dynamic) |bo| r.dev.destroyBo(bo);
             r.gpa.destroy(r);
+        }
+
+        /// The view has jumped: the next frame makes all the ground in view
+        /// (rather than showing it a few chunks at a time).
+        pub fn makeAllNow(r: *Self) void {
+            r.all_now = true;
         }
 
         /// The next frame's buffer for units and buildings, to make them in.

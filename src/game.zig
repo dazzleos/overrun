@@ -44,6 +44,9 @@ pub const Game = struct {
     minimap: *minimap_mod.Minimap,
     /// The left button held on the minimap (the view follows it).
     minimap_held: bool = false,
+    /// The view jumped (from the minimap): all the ground in view is to be
+    /// made at once, not a few chunks a frame.
+    view_jumped: bool = false,
     camera: math.Camera,
     /// What is chosen: indices into the world's things.
     chosen: std.ArrayList(usize) = .empty,
@@ -222,6 +225,7 @@ pub const Game = struct {
     pub fn lookAt(g: *Game, p: [2]f32) void {
         g.camera.target = .{ p[0], g.map.surfaceAt(p[0], p[1]), p[1] };
         g.keepViewOnMap();
+        g.view_jumped = true;
     }
 
     /// The ground at the view's corners (top left, top right, bottom
