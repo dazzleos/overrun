@@ -42,6 +42,7 @@ pub const Overrun = struct {
         if (g.dragBox() != null) layers.append(a, cx.make(DragBox{ .game = g })) catch {};
         layers.append(a, cx.make(kete.Align{ .alignment = .top_left, .child = cx.make(kete.Padding{ .padding = .all(12), .child = resources(cx, g) }) })) catch {};
         if (!g.menu_open) layers.append(a, cx.make(kete.Align{ .alignment = .top_right, .child = cx.make(kete.Padding{ .padding = .all(12), .child = cx.make(Minimap{ .game = g }) }) })) catch {};
+        if (!g.menu_open and g.following) layers.append(a, cx.make(kete.Align{ .alignment = .top_center, .child = cx.make(kete.Padding{ .padding = .all(12), .child = cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(10), .child = cx.make(kete.Padding{ .padding = .{ .left = 14, .top = 6, .right = 14, .bottom = 6 }, .child = label(cx, "Following (F to stop)", 15) }) }) }) })) catch {};
         if (!g.menu_open) if (chosenPanel(cx, g)) |p| layers.append(a, cx.make(kete.Align{ .alignment = .bottom_center, .child = cx.make(kete.Padding{ .padding = .all(14), .child = p }) })) catch {};
         if (g.menu_open) {
             layers.append(a, cx.make(kete.Align{ .alignment = .center, .child = menu(cx, g) })) catch {};

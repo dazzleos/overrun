@@ -47,6 +47,8 @@ pub const Game = struct {
     minimap: *minimap_mod.Minimap,
     /// The left button held on the minimap (the view follows it).
     minimap_held: bool = false,
+    /// The view follows what is chosen (F).
+    following: bool = false,
     /// The view jumped (from the minimap): all the ground in view is to be
     /// made at once, not a few chunks a frame.
     view_jumped: bool = false,
@@ -151,8 +153,40 @@ pub const Game = struct {
         if (g.keys.contains(.down) or g.keys.contains(.s)) dz -= 1;
         if (dx != 0 or dz != 0) {
             const speed = g.camera.zoom * 1.4 * dt;
+            g.following = false;
             g.moveView(.{ dx * speed, dz * speed });
         }
+        if (g.following) g.follow(dt);
+    }
+
+    /// F: the view follows what is chosen (or stops following it).
+    pub fn toggleFollowing(g: *Game) void {
+        g.following = !g.following and g.chosenMiddle() != null;
+    }
+
+    /// The middle of what is chosen (across the ground), if anything is.
+    pub fn chosenMiddle(g: *const Game) ?[2]f32 {
+        if (g.chosen.items.len == 0) return null;
+        var sum: [2]f32 = .{ 0, 0 };
+        for (g.chosen.items) |i| {
+            sum[0] += g.world.things[i].pos[0];
+            sum[1] += g.world.things[i].pos[2];
+        }
+        const n: f32 = @floatFromInt(g.chosen.items.len);
+        return .{ sum[0] / n, sum[1] / n };
+    }
+
+    /// The view moved `dt` seconds' worth towards what is chosen (gliding
+    /// there, then keeping up with it), as far as it keeps to the map.
+    fn follow(g: *Game, dt: f32) void {
+        const to = g.chosenMiddle() orelse {
+            g.following = false;
+            return;
+        };
+        const k = 1 - @exp(-6 * dt);
+        g.camera.target[0] += (to[0] - g.camera.target[0]) * k;
+        g.camera.target[2] += (to[1] - g.camera.target[2]) * k;
+        g.keepViewOnMap();
     }
 
     pub fn key(g: *Game, k: kete.KeyboardKey, pressed: bool) void {
@@ -162,6 +196,7 @@ pub const Game = struct {
         if (k == .escape) {
             if (g.menu_open) g.closeMenu() else g.openMenu();
         }
+        if (k == .f and !g.menu_open) g.toggleFollowing();
     }
 
     /// Where on the ground (at the view's middle's height) a point of the
@@ -228,6 +263,7 @@ pub const Game = struct {
     /// Moves the view's middle to (x, z), or as near as it keeps to the
     /// map.
     pub fn lookAt(g: *Game, p: [2]f32) void {
+        g.following = false;
         g.camera.target = .{ p[0], view_height, p[1] };
         g.keepViewOnMap();
         g.view_jumped = true;
@@ -253,6 +289,7 @@ pub const Game = struct {
         if (!pan.moved and @abs(dx) + @abs(dy) < drag_threshold) return;
         pan.moved = true;
         pan.last = p;
+        g.following = false;
         // A pixel, in blocks across the screen; up it, the ground slants
         // away (seen from the camera's angle), so it is further.
         const per_pixel = 2 * g.camera.zoom / g.view_size[1];
@@ -505,6 +542,38 @@ test "dragging with the right button moves the view, the ground following the po
     g.panDown(.{ 600, 400 });
     g.panMoved(.{ 602, 401 });
     try testing.expect(g.panUp());
+}
+
+test "F: the view follows what is chosen, until it is moved" {
+    var g = try testGame();
+    defer g.deinit();
+    g.view_size = .{ 1280, 720 };
+    g.closeMenu();
+    // Nothing chosen: nothing to follow.
+    g.key(.f, true);
+    try testing.expect(!g.following);
+    g.key(.f, false);
+    for (g.world.all(), 0..) |t, i| if (!t.kind.isBuilding()) g.chosen.append(testing.allocator, i) catch {};
+    g.key(.f, true);
+    g.key(.f, false);
+    try testing.expect(g.following);
+    // Sent away: the view goes with them.
+    g.sendTo(.{ map_mod.centre[0], 2, map_mod.centre[1] });
+    for (0..60 * 20) |_| g.tick(1.0 / 60.0);
+    const mid = g.chosenMiddle().?;
+    try testing.expect(@abs(g.camera.target[0] - mid[0]) < 1 and @abs(g.camera.target[2] - mid[1]) < 1);
+    // Moved by hand: no longer following.
+    g.panDown(.{ 600, 400 });
+    g.panMoved(.{ 700, 400 });
+    _ = g.panUp();
+    try testing.expect(!g.following);
+    // F again, and again: on, then off.
+    g.key(.f, true);
+    g.key(.f, false);
+    try testing.expect(g.following);
+    g.key(.f, true);
+    g.key(.f, false);
+    try testing.expect(!g.following);
 }
 
 test "the view sent off the map (from the minimap's corner) is put back on it" {
