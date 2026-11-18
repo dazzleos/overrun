@@ -67,7 +67,7 @@ const Scene = struct {
             const age = g.world.time - sent.time;
             if (age < 0.8) models.ring(&b, sent.at + V3{ 0, 0.06, 0 }, 0.3 + age, mesh.rgb(0xffd25a));
         }
-        try s.renderer.draw(renderer_mod.FrameSink{ .frame = f }, vp, scissor, m, g.camera.groundBox(aspect, map_mod.lowest, map_mod.highest), b.n);
+        try s.renderer.draw(renderer_mod.FrameSink{ .frame = f }, vp, scissor, m, g.camera.groundBox(aspect, map_mod.lowest, map_mod.highest + map_mod.tallest_tree), b.n);
     }
 };
 

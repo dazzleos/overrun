@@ -45,7 +45,7 @@ const Chunk = struct {
     count: u32 = 0,
     /// As low and high as it can be, until its heights are made.
     lo: f32 = @min(map_mod.lowest, map_mod.water_level),
-    hi: f32 = map_mod.highest,
+    hi: f32 = map_mod.highest + map_mod.tallest_tree,
 };
 
 /// How many chunks are made in a frame (the rest in the frames after:
@@ -177,7 +177,7 @@ pub fn Renderer(comptime Device: type) type {
             // How high it goes, now its heights are made.
             const range = r.map.chunkHeights(cx, cz);
             c.lo = @min(range[0], map_mod.water_level);
-            c.hi = range[1];
+            c.hi = range[1] + map_mod.tallest_tree;
         }
 
         /// Takes a chunk off the GPU (one still being drawn is kept by the

@@ -106,6 +106,36 @@ pub fn colourOf(h: f32, steep: f32, salt: u32) mesh.Rgb {
     return groundColour(h, steep, salt);
 }
 
+/// How thick the forest is at (x, z), from 0 (none) to 1: patches of it
+/// here and there, some large.
+pub fn forestOf(seed: u32, x: f32, z: f32) f32 {
+    return smoothstep(0.5, 0.62, fbm(seed +% 23, x / 34, z / 34, 3));
+}
+
+/// Whether a tree can grow at height `h`: not by the water (on the sand)
+/// or up on the rock.
+pub fn treeHeight(h: f32) bool {
+    return h > water_level + 0.45 and h < 3.4;
+}
+
+/// The tallest a tree is.
+pub const tallest_tree: f32 = 2.2;
+
+/// A tree: where its foot is, how wide and tall, and its shade (0 to 1).
+pub const Tree = struct {
+    at: V3,
+    radius: f32,
+    height: f32,
+    shade: f32,
+};
+
+/// The way to the camera, across the ground (it does not turn, so a tree
+/// is only the two faces of its pyramid that face it).
+const to_viewer = blk: {
+    const yaw = (math.Camera{ .target = .{ 0, 0, 0 } }).yaw;
+    break :blk [2]f32{ -@sin(yaw), @cos(yaw) };
+};
+
 /// What a height is kept as: 1/1024ths of a block.
 const height_scale: f32 = 1024;
 
@@ -256,6 +286,29 @@ pub const Map = struct {
         return null;
     }
 
+    /// The tree in the cell from corner (c, r) (across and down from it),
+    /// if there is one: in a forest, on level enough ground, not by a
+    /// base.
+    pub fn treeAt(m: *const Map, c: usize, r: usize) ?Tree {
+        const salt = @as(u32, @intCast(c)) *% 0x2c1b3c6d ^ @as(u32, @intCast(r)) *% 0x297a2d39 ^ m.seed *% 0x9e3779b9;
+        const p = at(c, r);
+        const x = p[0] + 0.2 + 0.6 * hash(salt);
+        const z = p[1] + (0.15 + 0.7 * hash(salt +% 1)) * row_gap;
+        if (hash(salt +% 2) >= forestOf(m.seed, x, z) * 0.85) return null;
+        for (bases) |b| if ((x - b[0]) * (x - b[0]) + (z - b[1]) * (z - b[1]) < (base_radius + 4) * (base_radius + 4)) return null;
+        const h = m.heightAt(x, z);
+        if (!treeHeight(h)) return null;
+        const dx = m.heightAt(x + 0.4, z) - m.heightAt(x - 0.4, z);
+        const dz = m.heightAt(x, z + 0.4) - m.heightAt(x, z - 0.4);
+        if (@sqrt(dx * dx + dz * dz) > 0.7) return null;
+        return .{
+            .at = .{ x, h, z },
+            .radius = 0.4 + 0.25 * hash(salt +% 3),
+            .height = 1.3 + (tallest_tree - 1.3) * hash(salt +% 4),
+            .shade = hash(salt +% 5),
+        };
+    }
+
     /// How low and how high chunk (cx, cz)'s corners are.
     pub fn chunkHeights(m: *const Map, cx: usize, cz: usize) [2]f32 {
         var lo: f32 = std.math.inf(f32);
@@ -267,8 +320,9 @@ pub const Map = struct {
         return .{ lo, hi };
     }
 
-    /// The most vertices a chunk is (its triangles, and water over each).
-    pub const chunk_vertices = chunk * chunk * 2 * 3 * 2;
+    /// The most vertices a chunk is (its triangles, water over each, and
+    /// a tree in each cell).
+    pub const chunk_vertices = chunk * chunk * (2 * 3 * 2 + 2 * 3);
 
     /// Where chunk (cx, cz) is, across and down: from, and to.
     pub fn chunkBounds(cx: usize, cz: usize) [2][2]f32 {
@@ -301,6 +355,7 @@ pub const Map = struct {
                     b.shaded(w, dim(waterColour(mid), light));
                 }
             }
+            if (m.treeAt(c, r)) |t| tree(&b, t, if (inside(t.at[0], t.at[2]) < 0) outside_light else 1);
         };
         return b.n;
     }
@@ -317,6 +372,26 @@ fn groundColour(h: f32, steep: f32, salt: u32) mesh.Rgb {
     c = mixRgb(c, rock, @max(smoothstep(0.18, 0.4, steep), smoothstep(3.6, 4.6, h)));
     const k = 0.94 + 0.1 * hash(salt);
     return .{ c[0] * k, c[1] * k, c[2] * k };
+}
+
+/// A tree: the two faces of a three-sided pyramid that face the camera.
+fn tree(b: *mesh.Builder, t: Tree, light: f32) void {
+    const v = to_viewer;
+    const side = [2]f32{ -v[1], v[0] };
+    const foot = t.at - V3{ 0, 0.15, 0 };
+    const front = foot + V3{ v[0] * t.radius, 0, v[1] * t.radius };
+    const back = [2]f32{ -v[0] * t.radius * 0.5, -v[1] * t.radius * 0.5 };
+    const left = foot + V3{ back[0] - side[0] * t.radius * 0.87, 0, back[1] - side[1] * t.radius * 0.87 };
+    const right = foot + V3{ back[0] + side[0] * t.radius * 0.87, 0, back[1] + side[1] * t.radius * 0.87 };
+    const top = t.at + V3{ 0, t.height, 0 };
+    const c = mixRgb(mesh.rgb(0x2b5e2e), mesh.rgb(0x3e7436), t.shade);
+    for ([2][2]V3{ .{ left, front }, .{ front, right } }) |e| {
+        var q = [3]V3{ e[0], e[1], top };
+        // Facing the camera (counter-clockwise seen from it).
+        const n = math.cross(q[1] - q[0], q[2] - q[0]);
+        if (n[0] * v[0] + n[2] * v[1] < 0) std.mem.swap(V3, &q[0], &q[1]);
+        b.shaded(q, dim(mesh.lit(c, math.cross(q[1] - q[0], q[2] - q[0])), light));
+    }
 }
 
 /// The water's colour over ground `h` high: darker where it is deeper.
@@ -433,6 +508,47 @@ test "the map is a hexagon: its corners on the lattice; past it, the ground dimm
     try testing.expect(m.raycast(.{ centre[0] - radius - 10, 30, centre[1] }, .{ 0, -1, 0 }) == null);
 }
 
+fn onRows(p: [3]V3) bool {
+    for (p) |q| {
+        const r = q[2] / row_gap;
+        if (@abs(r - @round(r)) > 1e-3) return false;
+    }
+    return true;
+}
+
+test "forests: trees in them, none by the bases; each two triangles facing the camera" {
+    const m = try Map.create(testing.allocator, 1);
+    defer m.destroy(testing.allocator);
+    var trees: usize = 0;
+    var in_forest: usize = 0;
+    var r: usize = margin_rows;
+    while (r < rows - margin_rows) : (r += 2) {
+        var c: usize = margin_cols;
+        while (c < cols - margin_cols) : (c += 2) {
+            const p = Map.at(c, r);
+            if (forestOf(1, p[0], p[1]) > 0.9 and treeHeight(m.heightAt(p[0], p[1]))) in_forest += 1;
+            const t = m.treeAt(c, r) orelse continue;
+            trees += 1;
+            try testing.expect(treeHeight(t.at[1]) and t.height <= tallest_tree);
+            for (bases) |b| try testing.expect(@abs(t.at[0] - b[0]) + @abs(t.at[2] - b[1]) > base_radius);
+        }
+    }
+    // A good many trees, and thick forest.
+    try testing.expect(trees > 2000 and in_forest > 1000);
+    // A tree: two triangles, facing the camera.
+    var verts: [8]Vertex = undefined;
+    var b: mesh.Builder = .{ .out = &verts };
+    tree(&b, .{ .at = .{ 10, 1, 10 }, .radius = 0.5, .height = 2, .shade = 0.5 }, 1);
+    try testing.expectEqual(@as(usize, 6), b.n);
+    const cam: math.Camera = .{ .target = .{ 10, 1, 10 } };
+    var i: usize = 0;
+    while (i < 6) : (i += 3) {
+        const p: [3]V3 = .{ verts[i].pos, verts[i + 1].pos, verts[i + 2].pos };
+        const n = math.cross(p[1] - p[0], p[2] - p[0]);
+        try testing.expect(math.dot(n, cam.forward()) < 0);
+    }
+}
+
 test "the triangles: equilateral from above, facing up, six round each corner" {
     const m = try Map.create(testing.allocator, 1);
     defer m.destroy(testing.allocator);
@@ -445,8 +561,10 @@ test "the triangles: equilateral from above, facing up, six round each corner" {
     while (i < n) : (i += 3) {
         const p: [3]V3 = .{ verts[i].pos, verts[i + 1].pos, verts[i + 2].pos };
         try testing.expect(math.cross(p[1] - p[0], p[2] - p[0])[1] > 0);
-        // Water is over the ground's triangle: only the ground's counted.
+        // Water is over the ground's triangle, and trees on it: only the
+        // ground's counted (its corners on the rows).
         if (verts[i].pos[1] == water_level and verts[i + 1].pos[1] == water_level) continue;
+        if (!onRows(p)) continue;
         for (0..3) |k| {
             const a = p[k];
             const b = p[(k + 1) % 3];

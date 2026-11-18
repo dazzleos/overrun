@@ -153,21 +153,41 @@ const DragBox = struct {
 };
 
 /// The minimap: the map's hexagon, the units and buildings on it, and the
-/// view's outline; pressed (or dragged on), the view goes there.
+/// view's outline; pressed (or dragged on), the view goes there. It is
+/// turned as the view is (the view's up, up it), so what the view shows
+/// is upright on it.
 const Minimap = struct {
     game: *Game,
 
     /// Room round the hexagon (for its border, and the view's outline
     /// past its edge).
     const pad = 8;
+    /// Across and down: the hexagon, turned any way, fits.
+    const side: f32 = minimap.width + 2 * pad;
 
     pub fn layout(_: *const Minimap, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
-        return c.constrain(.{ .w = minimap.width + 2 * pad, .h = @as(f32, minimap.height) + 2 * pad });
+        return c.constrain(.{ .w = side, .h = side });
     }
 
-    fn at(p: [2]f32) kete.Point {
-        const q = minimap.toPixel(p);
-        return .{ q[0] + pad, q[1] + pad };
+    /// The minimap's picture's pixel `p`, turned: where it is on the
+    /// widget.
+    fn turned(self: *const Minimap, p: [2]f32) kete.Point {
+        const yaw = self.game.camera.yaw;
+        const mid = minimap.toPixel(map_centre);
+        const v = [2]f32{ p[0] - mid[0], p[1] - mid[1] };
+        return .{ side / 2 + v[0] * @cos(yaw) + v[1] * @sin(yaw), side / 2 - v[0] * @sin(yaw) + v[1] * @cos(yaw) };
+    }
+
+    /// Where on the map (x, z) a point of the widget is.
+    fn mapAt(self: *const Minimap, w: kete.Point) [2]f32 {
+        const yaw = self.game.camera.yaw;
+        const mid = minimap.toPixel(map_centre);
+        const v = [2]f32{ w[0] - side / 2, w[1] - side / 2 };
+        return minimap.fromPixel(.{ mid[0] + v[0] * @cos(yaw) - v[1] * @sin(yaw), mid[1] + v[0] * @sin(yaw) + v[1] * @cos(yaw) });
+    }
+
+    fn at(self: *const Minimap, p: [2]f32) kete.Point {
+        return self.turned(minimap.toPixel(p));
     }
 
     pub fn paint(self: *const Minimap, _: *kete.WidgetNode, p: *kete.Painter) void {
@@ -175,23 +195,31 @@ const Minimap = struct {
         var c = p.canvas();
         // A border round the hexagon.
         var hex: [6]kete.Point = undefined;
-        const mid = minimap.toPixel(@import("map.zig").centre);
         for (&hex, minimap.hexagon()) |*h, k| {
-            const out = [2]f32{ k[0] - mid[0], k[1] - mid[1] };
+            const q = self.turned(k);
+            const out = [2]f32{ q[0] - side / 2, q[1] - side / 2 };
             const len = @sqrt(out[0] * out[0] + out[1] * out[1]);
-            h.* = .{ k[0] + out[0] / len * 4 + pad, k[1] + out[1] / len * 4 + pad };
+            h.* = .{ q[0] + out[0] / len * 4, q[1] + out[1] / len * 4 };
         }
         c.fillPolygon(&hex, panel_bg);
-        c.drawImage(&g.minimap.image, .{ .x = pad, .y = pad, .w = minimap.width, .h = @floatFromInt(minimap.height) }, 1);
+        // The picture, turned: two triangles.
+        const w: f32 = minimap.width;
+        const h: f32 = @floatFromInt(minimap.height);
+        var quad: [4][4]f32 = undefined;
+        for (&quad, [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } }) |*q, uv| {
+            const at_ = self.turned(.{ uv[0] * w, uv[1] * h });
+            q.* = .{ at_[0], at_[1], uv[0], uv[1] };
+        }
+        c.drawImageTriangles(&g.minimap.image, &.{ quad[0], quad[1], quad[2], quad[0], quad[2], quad[3] }, 1);
         // The units (small) and buildings (larger), in their teams' colours.
         for (g.world.all()) |t| {
-            const q = at(.{ t.pos[0], t.pos[2] });
+            const q = self.at(.{ t.pos[0], t.pos[2] });
             const s: f32 = if (t.kind.isBuilding()) 4 else 2.5;
             c.fillRect(.{ .x = q[0] - s / 2, .y = q[1] - s / 2, .w = s, .h = s }, gfx.Color.rgb(units.team_colours[t.team]));
         }
-        // What the view shows.
+        // What the view shows (upright).
         var view: [4]kete.Point = undefined;
-        for (&view, g.viewCorners()) |*v, k| v.* = at(k);
+        for (&view, g.viewCorners()) |*v, k| v.* = self.at(k);
         c.strokePolyline(&view, true, 1.5, gfx.Color.argb(0xeeffffff));
     }
 
@@ -200,23 +228,24 @@ const Minimap = struct {
         switch (e) {
             .press => |pr| if (pr.button == .left) {
                 g.minimap_held = true;
-                g.lookAt(minimap.fromPixel(.{ pr.pos[0] - pad, pr.pos[1] - pad }));
+                g.lookAt(self.mapAt(pr.pos));
                 return true;
             },
             .motion => |pos| if (g.minimap_held) {
-                g.lookAt(minimap.fromPixel(.{ pos[0] - pad, pos[1] - pad }));
+                g.lookAt(self.mapAt(pos));
                 return true;
             },
             .release => |r| if (r.button == .left) {
                 g.minimap_held = false;
                 return true;
             },
-            .context => return false,
             else => {},
         }
         return false;
     }
 };
+
+const map_centre = @import("map.zig").centre;
 
 /// The battlefield, drawn by the renderer; the mouse's presses on it are
 /// the game's.
@@ -432,7 +461,7 @@ test "pressing the minimap moves the view there" {
     const view: Overrun = .{ .game = &g };
     u.frame(1280, 720, 0, view);
     // The minimap's middle (top right): the map's.
-    const mid: kete.Point = .{ 1280 - 12 - Minimap.pad - minimap.width / 2, 12 + Minimap.pad + @as(f32, minimap.height) / 2 };
+    const mid: kete.Point = .{ 1280 - 12 - Minimap.side / 2, 12 + Minimap.side / 2 };
     u.pointerMotion(mid);
     u.pointerButton(mid, .left, true);
     u.pointerButton(mid, .left, false);
@@ -441,6 +470,26 @@ test "pressing the minimap moves the view there" {
     try testing.expectApproxEqAbs(centre[1], g.camera.target[2], 2);
     // Nothing chosen by it (the battlefield did not have the press).
     try testing.expect(g.dragBox() == null);
+}
+
+test "the minimap turned as the view is: the view upright on it" {
+    var g = try Game.init(testing.allocator, 1);
+    defer g.deinit();
+    g.view_size = .{ 1280, 720 };
+    const m: Minimap = .{ .game = &g };
+    const k = g.viewCorners();
+    const tl = m.at(k[0]);
+    const tr = m.at(k[1]);
+    const br = m.at(k[2]);
+    // Its top edge level, its right edge upright, as wide as the view is.
+    try testing.expectApproxEqAbs(tl[1], tr[1], 0.01);
+    try testing.expectApproxEqAbs(tr[0], br[0], 0.01);
+    try testing.expect(tr[0] > tl[0] and br[1] > tr[1]);
+    try testing.expectApproxEqAbs(@as(f32, 1280.0 / 720.0), (tr[0] - tl[0]) / (br[1] - tr[1]) / @sin(g.camera.pitch), 0.05);
+    // And back.
+    const back = m.mapAt(m.at(.{ 200, 150 }));
+    try testing.expectApproxEqAbs(@as(f32, 200), back[0], 1e-2);
+    try testing.expectApproxEqAbs(@as(f32, 150), back[1], 1e-2);
 }
 
 fn overflows(node: *kete.WidgetNode) bool {
