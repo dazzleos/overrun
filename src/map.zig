@@ -35,7 +35,7 @@ pub const rows = 112 + 2 * margin_rows + 1;
 pub const water_level: f32 = 0.6;
 /// Corners across and rows down a chunk (drawn, or not, together).
 pub const chunk = 16;
-pub const chunks_x = size / chunk;
+pub const chunks_x = (cols - 1) / chunk;
 pub const chunks_z = (rows - 1) / chunk;
 
 /// The map's middle (a corner of the lattice, on an even row: its column
@@ -356,6 +356,9 @@ test "the map is a hexagon: its corners on the lattice; past it, the ground dimm
         }
     };
     try testing.expect(farthest < -40);
+    // The chunks cover all of it.
+    try testing.expectEqual(@as(usize, cols - 1), chunks_x * chunk);
+    try testing.expectEqual(@as(usize, rows - 1), chunks_z * chunk);
     try testing.expect(brightest_out < brightest_in * 0.6);
     try testing.expect(!m.passable(centre[0] - radius - 1, centre[1]));
     try testing.expect(m.raycast(.{ centre[0] - radius - 10, 30, centre[1] }, .{ 0, -1, 0 }) == null);
