@@ -23,7 +23,7 @@ pub fn armourOf(k: Kind) Armour {
     return switch (k) {
         .walker, .drone => .light,
         .tank, .builder, .flak => .vehicle,
-        .air_builder, .bomber, .fighter => .air,
+        .air_builder, .bomber, .fighter, .missile => .air,
         else => .building,
     };
 }
@@ -42,6 +42,9 @@ pub fn maxHealth(k: Kind) f32 {
         .tower => 450,
         .factory => 1200,
         .power, .mine => 350,
+        .silo => 900,
+        // Hard to shoot down: tough, and hard to hit (see `fire`).
+        .missile => 250,
     };
 }
 
@@ -336,7 +339,8 @@ fn fire(w: *World, t: *Thing, slot: usize, wp: Weapon, j: usize) void {
     // A bullet: it hits (most of the time) at once; its tracer is just to
     // be seen.
     const salt = @as(u32, @intFromFloat(@abs(w.time) * 1000)) ^ @as(u32, @intFromFloat(@abs(t.pos[0]) * 7));
-    const hits = hash(salt) < 0.85;
+    // A missile, fast and high, is hard to hit.
+    const hits = hash(salt) < (if (o.kind == .missile) @as(f32, 0.25) else 0.85);
     var to = middle(o);
     if (hits) {
         w.things[j].health -= wp.damage[@intFromEnum(armourOf(o.kind))];
@@ -357,6 +361,29 @@ fn burst(w: *World, s: Shot) void {
         if (d > reach) continue;
         const k = 1 - 0.6 * d / reach;
         t.health -= s.damage[@intFromEnum(armourOf(t.kind))] * k;
+    }
+}
+
+/// How much a missile's burst does at its middle, how far it reaches, and
+/// how much of it a tower (hardened) takes.
+pub const missile_damage: f32 = 1500;
+pub const missile_radius: f32 = 7;
+const tower_hardened: f32 = 0.25;
+
+/// A missile bursting at `at`: everything of other players' on the
+/// ground near is hurt, less further off (enough to destroy a factory,
+/// not a tower).
+pub fn missileBurst(w: *World, team: u2, at: V3) void {
+    w.addBlast(.{ .at = at, .size = 6 });
+    for ([_][2]f32{ .{ 3, 0 }, .{ -2, 2.5 }, .{ -2, -2.5 } }) |o| w.addBlast(.{ .at = at + V3{ o[0], 0.5, o[1] }, .size = 3 });
+    for (w.things[0..w.count]) |*t| {
+        if (t.team == team or t.kind.flies()) continue;
+        const reach = missile_radius + t.kind.radius();
+        const d = @sqrt(flat2(t.pos, at));
+        if (d > reach) continue;
+        var amount = missile_damage * (1 - 0.6 * d / reach);
+        if (t.kind == .tower) amount *= tower_hardened;
+        t.health -= amount;
     }
 }
 
@@ -486,4 +513,53 @@ test "destroyed: taken out, the rest kept in order, a building's ground freed" {
     try testing.expectEqual(@as(?u16, 1), w.moved_to[c]);
     try testing.expect(w.map.nav.openAt(.foot, b[0], b[1] + 8));
     try testing.expect(w.blast_count > 0);
+}
+
+test "a silo: builds its missile for metal; launched, it flies high and destroys a factory, not a tower" {
+    const w = try testWorld();
+    defer freeWorld(w);
+    const c = map_mod.centre;
+    const silo = w.add(.{ .kind = .silo, .team = 0, .pos = .{ c[0] - 60, 0, c[1] } }).?;
+    _ = w.add(.{ .kind = .walker, .team = 0, .pos = .{ c[0] - 55, 0, c[1] } }).?;
+    w.launchMissile(silo, .{ c[0], c[1] });
+    // Not ready: nothing launched.
+    try testing.expectEqual(@as(usize, 2), w.count);
+    w.orderMissile(silo);
+    const metal = w.resources[0].metal;
+    var t: f32 = 0;
+    while (t < 60 and !w.things[silo].armed) : (t += 0.25) w.step(0.25);
+    try testing.expect(w.things[silo].armed);
+    try testing.expectApproxEqAbs(metal - Kind.missile.cost().metal, w.resources[0].metal, 1);
+
+    _ = w.add(.{ .kind = .factory, .team = 1, .pos = .{ c[0], 0, c[1] } }).?;
+    _ = w.add(.{ .kind = .tower, .team = 1, .pos = .{ c[0] + 4, 0, c[1] + 3 } }).?;
+    w.launchMissile(silo, .{ c[0], c[1] });
+    try testing.expect(!w.things[silo].armed);
+    try testing.expectEqual(Kind.missile, w.things[w.count - 1].kind);
+    var highest: f32 = 0;
+    t = 0;
+    while (t < 30) : (t += 1.0 / 30.0) {
+        w.step(1.0 / 30.0);
+        var flying = false;
+        for (w.all()) |o| if (o.kind == .missile) {
+            flying = true;
+            highest = @max(highest, o.pos[1]);
+        };
+        if (!flying) break;
+    }
+    // It went high, and it got there: the factory gone, the tower (and
+    // what was near the silo) still there.
+    try testing.expect(highest > 25);
+    var factories: usize = 0;
+    var towers: usize = 0;
+    var walkers: usize = 0;
+    for (w.all()) |o| switch (o.kind) {
+        .factory => factories += 1,
+        .tower => towers += 1,
+        .walker => walkers += 1,
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 0), factories);
+    try testing.expectEqual(@as(usize, 1), towers);
+    try testing.expectEqual(@as(usize, 1), walkers);
 }

@@ -117,6 +117,14 @@ fn chosenPanel(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
         }
         return panel(cx, "Factory: click to queue, right-click to take one out", cells.items);
     }
+    if (g.chosenSilo()) |si| {
+        const s = g.world.things[si];
+        const q = a.create(SiloButton) catch return null;
+        q.* = .{ .game = g };
+        const note = if (g.targeting != null) "Aiming" else if (s.armed) "Ready: click to aim" else if (s.queued > 0) cx.fmt("Building, {d:.0}%", .{s.progress * 100}) else "Click to build";
+        const cells = a.dupe(kete.Widget, &.{kindCell(cx, .missile, s.armed or s.queued > 0, g.targeting != null, note, .of(q, SiloButton.press))}) catch return null;
+        return panel(cx, if (g.targeting != null) "Click where to send it (here, or on the minimap); right-click to stop" else "Missile silo: one missile at a time", cells);
+    }
     if (g.buildersChosen()) {
         var cells: std.ArrayList(kete.Widget) = .empty;
         for (units.constructible) |k| {
@@ -173,7 +181,7 @@ fn kindCell(cx: *kete.BuildContext, k: Kind, on: bool, active: bool, note: []con
 
 // The icons chosen at run time (`iconOf`, and the window buttons').
 comptime {
-    _ = &[_]kete.IconName{ .local_airport, .airplanemode_active, .radar, .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
+    _ = &[_]kete.IconName{ .rocket, .rocket_launch, .my_location, .local_airport, .airplanemode_active, .radar, .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
 }
 
 fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {
@@ -186,6 +194,8 @@ fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {
         .bomber => .local_airport,
         .fighter => .airplanemode_active,
         .flak => .radar,
+        .missile => .rocket,
+        .silo => .rocket_launch,
         .power => .bolt,
         .mine => .diamond,
         .tower => .security,
@@ -200,6 +210,15 @@ const Queue = struct {
 
     fn add(q: *Queue) void {
         q.game.enqueue(q.kind);
+    }
+};
+
+/// A silo's button: its missile built, or aimed.
+const SiloButton = struct {
+    game: *Game,
+
+    fn press(q: *SiloButton) void {
+        q.game.siloPressed();
     }
 };
 
@@ -315,6 +334,11 @@ const Minimap = struct {
         const g = self.game;
         switch (e) {
             .press => |pr| if (pr.button == .left) {
+                // Aiming a missile: sent there.
+                if (g.targeting != null) {
+                    g.launchAt(self.mapAt(pr.pos));
+                    return true;
+                }
                 g.minimap_held = true;
                 g.lookAt(self.mapAt(pr.pos));
                 return true;
@@ -389,8 +413,9 @@ const Battlefield = struct {
                     // stopped, a factory's last queued taken out, or what
                     // is chosen let go of.
                     if (!g.panUp()) return true;
-                    if (g.placing != null) {
+                    if (g.placing != null or g.targeting != null) {
                         g.placing = null;
+                        g.targeting = null;
                         return true;
                     }
                     if (g.chosenFactory()) |f| {

@@ -33,6 +33,10 @@ pub const Kind = enum(u8) {
     fighter,
     /// On tracks, four guns pointing up: shoots at what flies.
     flak,
+    /// A missile, launched from a silo: rising, arcing high across the
+    /// map, and diving onto where it was sent, where it bursts (see
+    /// `World.flyMissile`).
+    missile,
     /// Guards the base: a gun on a column.
     tower,
     /// Makes units (see `Thing.queue`).
@@ -41,13 +45,15 @@ pub const Kind = enum(u8) {
     power,
     /// Digs metal.
     mine,
+    /// Builds a missile (one at a time), and launches it anywhere.
+    silo,
 
     pub fn isBuilding(k: Kind) bool {
         return @intFromEnum(k) >= @intFromEnum(Kind.tower);
     }
 
     pub fn flies(k: Kind) bool {
-        return k == .drone or k == .air_builder or k == .bomber or k == .fighter;
+        return k == .drone or k == .air_builder or k == .bomber or k == .fighter or k == .missile;
     }
 
     /// Whether it flies on wings (see `World.fly`): hovering, or tilted
@@ -76,6 +82,7 @@ pub const Kind = enum(u8) {
         return switch (k) {
             .tank, .builder, .flak => 1.4,
             .air_builder => 1.3,
+            .missile => 1.6,
             else => 1,
         };
     }
@@ -108,6 +115,8 @@ pub const Kind = enum(u8) {
             .factory => "Factory",
             .power => "Power plant",
             .mine => "Mine",
+            .missile => "Missile",
+            .silo => "Missile silo",
         };
     }
 
@@ -149,6 +158,8 @@ pub const Kind = enum(u8) {
             .factory => 2.2,
             .power => 1.4,
             .mine => 1.4,
+            .missile => 0.4,
+            .silo => 1.7,
         };
     }
 
@@ -167,6 +178,8 @@ pub const Kind = enum(u8) {
             .factory => 2.2,
             .power => 2.0,
             .mine => 2.6,
+            .missile => 0.5,
+            .silo => 1.0,
         };
     }
 
@@ -185,16 +198,39 @@ pub const Kind = enum(u8) {
             .factory => .{ .metal = 320, .energy = 160, .seconds = 25 },
             .power => .{ .metal = 70, .energy = 20, .seconds = 8 },
             .mine => .{ .metal = 60, .energy = 50, .seconds = 10 },
+            .silo => .{ .metal = 400, .energy = 250, .seconds = 30 },
+            // Built in a silo: metal alone.
+            .missile => .{ .metal = 300, .energy = 0, .seconds = 40 },
         };
     }
 };
 
 pub const Cost = struct { metal: f32, energy: f32, seconds: f32 };
 
+/// A missile's flight: a few seconds to climb and dive, and its speed
+/// across the map.
+const missile_seconds: f32 = 6;
+const missile_speed: f32 = 28;
+
+/// Where a missile is, `s` (0 to 1) of the way: across, slow at first
+/// (rising straight up) and at the end (diving straight down); up, an arc
+/// higher the further it goes.
+pub fn missileAt(map: *const Map, t: Thing, s: f32) V3 {
+    const across = s * s * (3 - 2 * s);
+    const x = t.launch[0] + (t.rally[0] - t.launch[0]) * across;
+    const z = t.launch[1] + (t.rally[1] - t.launch[1]) * across;
+    const d = @sqrt((t.rally[0] - t.launch[0]) * (t.rally[0] - t.launch[0]) + (t.rally[1] - t.launch[1]) * (t.rally[1] - t.launch[1]));
+    const apex = 30 + 0.12 * d;
+    const start = map.heightAt(t.launch[0], t.launch[1]) + 0.5;
+    const end = map.heightAt(t.rally[0], t.rally[1]);
+    const base = start + (end - start) * s;
+    return .{ x, base + 4 * apex * s * (1 - s), z };
+}
+
 /// What a factory makes.
 pub const buildable = [_]Kind{ .walker, .tank, .flak, .builder, .drone, .fighter, .bomber, .air_builder };
 /// What a builder builds.
-pub const constructible = [_]Kind{ .power, .mine, .tower, .factory };
+pub const constructible = [_]Kind{ .power, .mine, .tower, .factory, .silo };
 
 /// A builder's order: to build a `kind` at `at`, facing `yaw`.
 pub const Order = struct {
@@ -244,6 +280,14 @@ pub const Thing = struct {
     run_time: f32 = 0,
     /// Shots fired (an AA tank's next barrel).
     gun: u8 = 0,
+    /// A silo's: whether its missile is ready (`progress` how far it is
+    /// built, while `queued`).
+    armed: bool = false,
+    /// A missile's: where it was launched from (it is going to `rally`),
+    /// how long its flight takes, and how long it has flown.
+    launch: [2]f32 = .{ 0, 0 },
+    flight: f32 = 0,
+    flown: f32 = 0,
     /// How fast it is going now (it speeds up and slows down).
     moving: f32 = 0,
     /// Its legs', rotors' or drill's turn, for drawing them.
@@ -452,6 +496,58 @@ pub const World = struct {
         }
     }
 
+    /// A silo told to: builds its missile, paying for it as it goes.
+    fn buildMissile(w: *World, t: *Thing, dt: f32) void {
+        t.phase += dt;
+        if (t.armed or t.queued == 0) return;
+        const c = Kind.missile.cost();
+        const part = dt / c.seconds;
+        const r = &w.resources[t.team];
+        if (r.metal < c.metal * part) return;
+        r.metal -= c.metal * part;
+        t.progress += part;
+        if (t.progress < 1) return;
+        t.progress = 0;
+        t.queued = 0;
+        t.armed = true;
+    }
+
+    /// Silo `i` starts building a missile (if it has none, and is not).
+    pub fn orderMissile(w: *World, i: usize) void {
+        const t = &w.things[i];
+        if (t.kind != .silo or t.built < 1 or t.armed) return;
+        t.queued = 1;
+    }
+
+    /// Silo `i` launches its missile at `at` (anywhere on the map).
+    pub fn launchMissile(w: *World, i: usize, at: [2]f32) void {
+        const s = w.things[i];
+        if (s.kind != .silo or !s.armed) return;
+        const d = @sqrt((at[0] - s.pos[0]) * (at[0] - s.pos[0]) + (at[1] - s.pos[2]) * (at[1] - s.pos[2]));
+        const m = w.add(.{ .kind = .missile, .team = s.team, .pos = s.pos, .rally = at, .launch = .{ s.pos[0], s.pos[2] }, .flight = missile_seconds + d / missile_speed }) orelse return;
+        w.things[m].pos = s.pos + V3{ 0, 0.5, 0 };
+        w.things[i].armed = false;
+    }
+
+    /// A missile's way: up out of its silo, high over the map, and down
+    /// onto where it was sent; there, it bursts.
+    fn flyMissile(w: *World, t: *Thing, dt: f32) void {
+        t.flown += dt;
+        const s = @min(1, t.flown / t.flight);
+        const was = t.pos;
+        t.pos = missileAt(w.map, t.*, s);
+        // Facing the way it goes: `yaw` across, `aim` up (or down).
+        const d = t.pos - was;
+        const across = @sqrt(d[0] * d[0] + d[2] * d[2]);
+        if (across > 1e-4) t.yaw = std.math.atan2(d[0], -d[2]);
+        t.aim = std.math.atan2(d[1], @max(across, 1e-4));
+        t.phase += dt * 30;
+        if (s >= 1) {
+            combat.missileBurst(w, t.team, t.pos);
+            t.health = 0;
+        }
+    }
+
     /// Tells the units `which` to attack thing `j`: those that can, go
     /// after it (on the ground, sent to it; winged, flying at it).
     pub fn orderAttack(w: *World, which: []const usize, j: usize) void {
@@ -515,6 +611,8 @@ pub const World = struct {
                 .tower => {},
                 .factory => w.make(t, dt),
                 .mine, .power => t.phase += dt * 2,
+                .silo => w.buildMissile(t, dt),
+                .missile => w.flyMissile(t, dt),
             }
             const inc = income(t.kind);
             w.resources[t.team].metal += inc.metal * dt;
@@ -621,7 +719,7 @@ pub const World = struct {
         // Kept apart from the others (flying ones from flying ones, those
         // on the ground from those on the ground and from buildings).
         for (w.things[0..w.count], 0..) |o, j| {
-            if (j == i or o.kind.flies() != k.flies()) continue;
+            if (j == i or o.kind.flies() != k.flies() or o.kind == .missile) continue;
             const dx = nx - o.pos[0];
             const dz = nz - o.pos[2];
             const want_d = k.radius() + o.kind.radius();

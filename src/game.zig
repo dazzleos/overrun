@@ -59,6 +59,9 @@ pub const Game = struct {
     /// A building being placed (for the builders chosen to build), and
     /// where the pointer is (where it would go).
     placing: ?units.Kind = null,
+    /// A silo whose missile is being aimed (the next click on the map, or
+    /// the minimap, sends it there).
+    targeting: ?usize = null,
     hover: kete.Point = .{ 0, 0 },
     /// The view jumped (from the minimap): all the ground in view is to be
     /// made at once, not a few chunks a frame.
@@ -167,6 +170,7 @@ pub const Game = struct {
         // Those chosen that were destroyed, let go of; the rest, where
         // they now are.
         if (g.world.removed_any) {
+            if (g.targeting) |s| g.targeting = if (g.world.moved_to[s]) |to| to else null;
             var n: usize = 0;
             for (g.chosen.items) |i| if (g.world.moved_to[i]) |to| {
                 g.chosen.items[n] = to;
@@ -228,8 +232,9 @@ pub const Game = struct {
         if (k == .left_shift or k == .right_shift) g.shift = pressed;
         if (!pressed) return;
         if (k == .escape) {
-            if (g.placing != null) {
+            if (g.placing != null or g.targeting != null) {
                 g.placing = null;
+                g.targeting = null;
                 return;
             }
             if (g.menu_open) g.closeMenu() else g.openMenu();
@@ -394,7 +399,7 @@ pub const Game = struct {
     /// What is under the pointer (for highlighting what a click would
     /// choose), unless a box is being dragged or a building placed.
     pub fn hovered(g: *const Game) ?usize {
-        if (g.placing != null or g.dragBox() != null or g.menu_open) return null;
+        if (g.placing != null or g.targeting != null or g.dragBox() != null or g.menu_open) return null;
         return g.thingAt(g.hover);
     }
 
@@ -413,6 +418,31 @@ pub const Game = struct {
         const i = g.chosen.items[0];
         const t = g.world.things[i];
         return if (t.kind == .factory and t.built >= 1) i else null;
+    }
+
+    /// The silo chosen (alone, and built), if one is.
+    pub fn chosenSilo(g: *const Game) ?usize {
+        if (g.chosen.items.len != 1) return null;
+        const i = g.chosen.items[0];
+        const t = g.world.things[i];
+        return if (t.kind == .silo and t.built >= 1) i else null;
+    }
+
+    /// The silo's button: its missile built, or (ready) aimed.
+    pub fn siloPressed(g: *Game) void {
+        const s = g.chosenSilo() orelse return;
+        if (g.world.things[s].armed) {
+            g.targeting = if (g.targeting == null) s else null;
+        } else g.world.orderMissile(s);
+    }
+
+    /// The missile being aimed sent to (x, z), if it is on the map.
+    pub fn launchAt(g: *Game, at: [2]f32) void {
+        const s = g.targeting orelse return;
+        if (map_mod.inside(at[0], at[1]) < 0) return;
+        g.world.launchMissile(s, at);
+        g.targeting = null;
+        g.sent = .{ .at = .{ at[0], g.map.surfaceAt(at[0], at[1]), at[1] }, .time = g.world.time };
     }
 
     /// Whether any builders are chosen.
@@ -494,7 +524,7 @@ pub const Game = struct {
     pub fn pointerUp(g: *Game, p: kete.Point) void {
         const pr = g.press orelse return;
         g.press = null;
-        if (pr.dragging and g.placing == null) return g.chooseIn(pr.at, p);
+        if (pr.dragging and g.placing == null and g.targeting == null) return g.chooseIn(pr.at, p);
         g.click(p);
     }
 
@@ -507,6 +537,10 @@ pub const Game = struct {
 
     pub fn click(g: *Game, p: kete.Point) void {
         if (g.placing != null) return g.place(p);
+        if (g.targeting != null) {
+            const at = g.groundAt(p) orelse return;
+            return g.launchAt(.{ at[0], at[2] });
+        }
         if (g.thingAt(p)) |i| {
             const t = g.world.things[i];
             // One of this player's, not yet built, with builders chosen:

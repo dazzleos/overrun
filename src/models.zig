@@ -37,6 +37,8 @@ pub fn thing(b: *Builder, t: *const Thing) void {
         .bomber => aircraft(b, f, p, t, team, .bomber),
         .fighter => aircraft(b, f, p, t, team, .fighter),
         .flak => flak(b, f, p, t, team),
+        .missile => missile(b, p, t),
+        .silo => silo(b, f, p, t, team),
         .tower => tower(b, f, p, t, team),
         .factory => factory(b, f, p, t, team),
         .power => power(b, f, p, t, team),
@@ -152,6 +154,42 @@ fn aircraft(b: *Builder, f_in: Frame, p: V3, t: *const Thing, team: mesh.Rgb, k:
         b.box(spin, hub, .{ 0.035, 0.01, blade }, .{ 1, 1 }, metal);
     }
     shadow(b, .{ p[0], p[1] - k.altitude() + 0.04, p[2] }, if (big) @as(f32, 0.9) else 0.6);
+}
+
+/// A missile: a white body, a red nose, fins at its tail and a flame
+/// behind (glowing), pointing the way it goes.
+fn missile(b: *Builder, p: V3, t: *const Thing) void {
+    const s = t.kind.scale();
+    const f = Frame.of(t.yaw, 0, 0).tipped(t.aim).scaled(s);
+    // Along it (its forward), as a prism's axis.
+    const along = f.tipped(-std.math.pi / 2.0);
+    b.prism(along, p, 0.11, 0.45, 6, 1, rgb(0xe8e8e8));
+    b.prism(along, along.at(p, .{ 0, 0.6, 0 }), 0.11, 0.15, 6, 0, rgb(0xc8352c));
+    for ([2]f32{ 0, std.math.pi / 2.0 }) |a| {
+        const fin = along.turned(a);
+        b.box(fin, fin.at(p, .{ 0, -0.38, 0 }), .{ 0.22, 0.08, 0.015 }, .{ 1, 1 }, dark);
+    }
+    const flicker = 0.8 + 0.2 * @sin(t.phase * 2.3);
+    b.prism(along, along.at(p, .{ 0, -0.62 - 0.15 * flicker, 0 }), 0.08, 0.17 * flicker, 5, 0.2, .{ 2.6, 1.8, 0.7 });
+}
+
+/// A missile silo: a low concrete bunker, its two hatch doors (in its
+/// player's colour) open when its missile is ready (its red nose
+/// showing), a light glowing then.
+fn silo(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    const concrete = rgb(0x8c8a84);
+    b.box(f, f.at(p, .{ 0, 0.3, 0 }), .{ 1.5, 0.3, 1.5 }, .{ 0.9, 0.9 }, concrete);
+    b.box(f, f.at(p, .{ 0, 0.62, 0 }), .{ 1.0, 0.03, 1.0 }, .{ 1, 1 }, black);
+    const open: f32 = if (t.armed) 0.45 else 0;
+    for ([2]f32{ -1, 1 }) |side| {
+        b.box(f, f.at(p, .{ side * (0.5 + open), 0.66, 0 }), .{ 0.48, 0.05, 0.95 }, .{ 1, 1 }, mixRgb(team, dark, 0.3));
+    }
+    if (t.armed) {
+        const up = f.tipped(0);
+        b.prism(up, f.at(p, .{ 0, 0.75, 0 }), 0.2, 0.12, 6, 0, rgb(0xc8352c));
+    }
+    const lit: f32 = if (t.armed) 0.6 + 0.4 * @abs(@sin(t.phase * 4)) else if (t.queued > 0) 0.4 else 0;
+    b.box(f, f.at(p, .{ 1.25, 0.66, 1.25 }), .{ 0.1, 0.06, 0.1 }, .{ 1, 1 }, mixRgb(black, .{ 2.2, 0.6, 0.3 }, lit));
 }
 
 fn flak(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {

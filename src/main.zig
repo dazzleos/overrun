@@ -112,6 +112,11 @@ const Scene = struct {
             }
         }
         for (g.world.blasts[0..g.world.blast_count]) |bl| models.blast(&b, bl.at, bl.size, bl.age, combat.blast_seconds);
+        // Where a missile being aimed would land: its burst's reach.
+        if (g.targeting != null) if (g.groundAt(g.hover)) |at| {
+            models.ring(&b, at + V3{ 0, 0.08, 0 }, combat.missile_radius, mesh.rgb(0xf05e5e));
+            models.ring(&b, at + V3{ 0, 0.08, 0 }, 0.6, mesh.rgb(0xf05e5e));
+        };
         // The building being placed, under the pointer: green where it can
         // go, red where not.
         if (g.ghost()) |gh| {
