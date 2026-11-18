@@ -143,7 +143,7 @@ fn kindCell(cx: *kete.BuildContext, k: Kind, on: bool, active: bool, note: []con
         .child = cx.make(kete.SizedBox{ .width = 104, .child = cx.make(kete.Padding{ .padding = .all(7), .child = cx.make(kete.Column{ .fill = false, .spacing = 2, .cross_axis_alignment = .start, .children = a.dupe(kete.Widget, &.{
             cx.make(kete.Row{ .fill = false, .spacing = 4, .children = a.dupe(kete.Widget, &.{
                 cx.make(kete.Icon{ .icon = iconOf(k), .size = 18, .color = gfx.Color.argb(0xffffffff) }),
-                label(cx, k.name(), 13),
+                label(cx, k.shortName(), 13),
             }) catch &.{} }),
             cx.make(kete.Row{ .fill = false, .spacing = 3, .cross_axis_alignment = .center, .children = a.dupe(kete.Widget, &.{
                 cx.make(kete.Icon{ .icon = .construction, .size = 12, .color = gfx.Color.argb(0xffc8ccd2) }),
@@ -502,12 +502,16 @@ test "the view fits, menu or not, from the smallest window up" {
     const view: Overrun = .{ .game = &g };
     for ([_]bool{ true, false }) |menu_open| {
         g.menu_open = menu_open;
-        // With the factory chosen (its panel the widest thing).
-        g.chosen.clearRetainingCapacity();
-        for (g.world.all(), 0..) |t, i| if (t.kind == .factory) g.chosen.append(testing.allocator, i) catch {};
-        for ([_][2]u32{ min_size, open_size }) |size| {
-            u.frame(size[0], size[1], 0, view);
-            try testing.expect(!overflows(u.root.?));
+        // With the factory chosen, and with a builder (their panels the
+        // widest things).
+        for ([_]Kind{ .factory, .builder }) |k| {
+            g.chosen.clearRetainingCapacity();
+            if (k == .builder) _ = g.world.add(.{ .kind = .builder, .team = game_mod.me, .pos = .{ 100, 0, 100 } });
+            for (g.world.all(), 0..) |t, i| if (t.kind == k) g.chosen.append(testing.allocator, i) catch {};
+            for ([_][2]u32{ min_size, open_size }) |size| {
+                u.frame(size[0], size[1], 0, view);
+                try testing.expect(!overflows(u.root.?));
+            }
         }
     }
 }

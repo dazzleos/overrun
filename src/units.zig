@@ -58,6 +58,14 @@ pub const Kind = enum(u8) {
         };
     }
 
+    /// Its name, short (for buttons).
+    pub fn shortName(k: Kind) []const u8 {
+        return switch (k) {
+            .power => "Power",
+            else => k.name(),
+        };
+    }
+
     /// Blocks a second, at its best.
     pub fn speed(k: Kind) f32 {
         return switch (k) {
