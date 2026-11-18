@@ -82,7 +82,7 @@ const outside_light: f32 = 0.42;
 const base_radius: f32 = 9;
 
 /// The lowest and highest the ground can be (see `heightOf`).
-pub const lowest: f32 = -0.6 - rocky_bumps;
+pub const lowest: f32 = -0.6;
 pub const highest: f32 = 4.8 + highland_rise + rocky_bumps;
 
 /// How much higher the highlands go, and how rough rocky ground is.
@@ -120,9 +120,9 @@ pub fn heightOf(seed: u32, x: f32, z: f32) f32 {
         const ridge = 1 - @abs(noise(seed +% 37, x / 12, z / 12) * 2 - 1);
         h += high * highland_rise * (0.7 * fbm(seed +% 41, x / 16, z / 16, 3) + 0.3 * ridge * ridge);
     }
-    // Rocky ground: rough.
+    // Rocky ground: rough (only rising, so it does not hold water).
     const rocky = rockyOf(seed, x, z);
-    if (rocky > 0) h += rocky * rocky_bumps * (noise(seed +% 47, x / 1.8, z / 1.8) * 2 - 1);
+    if (rocky > 0) h += rocky * rocky_bumps * noise(seed +% 47, x / 1.8, z / 1.8);
     for (bases) |b| {
         const d = @sqrt((x - b[0]) * (x - b[0]) + (z - b[1]) * (z - b[1]));
         const k = smoothstep(base_radius + 6, base_radius, d);
