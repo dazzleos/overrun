@@ -25,6 +25,9 @@ const Kind = units.Kind;
 /// How far in and out the view zooms (blocks from its middle to its top).
 const min_zoom: f32 = 6;
 const max_zoom: f32 = 24;
+/// The height the view's middle is at (it does not follow the ground,
+/// which would move the view up and down as it went over hills).
+pub const view_height: f32 = 1.5;
 
 /// How far the mouse moves with a button down before it is a drag.
 const drag_threshold: f32 = 6;
@@ -96,7 +99,7 @@ pub const Game = struct {
         g.world.addBase(me);
         g.chosen.clearRetainingCapacity();
         const b = map_mod.bases[me];
-        g.camera.target = .{ b[0] + 4, g.map.heightAt(b[0], b[1]), b[1] + 4 };
+        g.camera.target = .{ b[0] + 4, view_height, b[1] + 4 };
         g.sent = null;
         g.keepViewOnMap();
     }
@@ -186,21 +189,23 @@ pub const Game = struct {
     }
 
     /// The view put back on the map: zoomed in until it fits at the map's
-    /// middle, and moved towards the middle until it fits where it is.
+    /// middle, and moved towards the middle until it fits where it is (as
+    /// little as it need be, however far off the map it was).
     pub fn keepViewOnMap(g: *Game) void {
-        const mid = V3{ map_mod.centre[0], g.map.surfaceAt(map_mod.centre[0], map_mod.centre[1]), map_mod.centre[1] };
+        const mid = V3{ map_mod.centre[0], view_height, map_mod.centre[1] };
         while (!g.viewFits(mid, g.camera.zoom) and g.camera.zoom > min_zoom) g.camera.zoom = @max(min_zoom, g.camera.zoom * 0.95);
-        var i: u32 = 0;
-        while (!g.viewFits(g.camera.target, g.camera.zoom) and i < 200) : (i += 1) {
-            const to = mid - g.camera.target;
-            const d = math.length(to);
-            if (d < 0.5) {
-                g.camera.target = mid;
-                break;
-            }
-            g.camera.target += to * math.splat(@min(1, 0.5 / d));
-            g.camera.target[1] = g.map.surfaceAt(g.camera.target[0], g.camera.target[2]);
+        g.camera.target[1] = view_height;
+        if (g.viewFits(g.camera.target, g.camera.zoom)) return;
+        // Halfway, and halfway again, along the way to the middle: the
+        // furthest from it that fits.
+        const away = g.camera.target - mid;
+        var fits: f32 = 0;
+        var not: f32 = 1;
+        for (0..24) |_| {
+            const t = (fits + not) / 2;
+            if (g.viewFits(mid + away * math.splat(t), g.camera.zoom)) fits = t else not = t;
         }
+        g.camera.target = mid + away * math.splat(fits);
     }
 
     /// Moves the view's middle `by` blocks across the screen (right) and
@@ -213,7 +218,7 @@ pub const Game = struct {
         const step = r * math.splat(by[0]) + f * math.splat(by[1]);
         for ([_]V3{ step, r * math.splat(by[0]), f * math.splat(by[1]) }) |s| {
             var moved = g.camera.target + s;
-            moved[1] = g.map.surfaceAt(moved[0], moved[2]);
+            moved[1] = view_height;
             if (!g.viewFits(moved, g.camera.zoom)) continue;
             g.camera.target = moved;
             return;
@@ -223,7 +228,7 @@ pub const Game = struct {
     /// Moves the view's middle to (x, z), or as near as it keeps to the
     /// map.
     pub fn lookAt(g: *Game, p: [2]f32) void {
-        g.camera.target = .{ p[0], g.map.surfaceAt(p[0], p[1]), p[1] };
+        g.camera.target = .{ p[0], view_height, p[1] };
         g.keepViewOnMap();
         g.view_jumped = true;
     }
@@ -482,7 +487,7 @@ test "dragging with the right button moves the view, the ground following the po
     var g = try testGame();
     defer g.deinit();
     // At the map's middle (room to move every way).
-    g.camera.target = .{ map_mod.centre[0], g.map.surfaceAt(map_mod.centre[0], map_mod.centre[1]), map_mod.centre[1] };
+    g.camera.target = .{ map_mod.centre[0], view_height, map_mod.centre[1] };
     const before = g.camera.target;
     // A point of the ground, on the view, before.
     const ground = before + V3{ 3, 0, 2 };
@@ -500,6 +505,21 @@ test "dragging with the right button moves the view, the ground following the po
     g.panDown(.{ 600, 400 });
     g.panMoved(.{ 602, 401 });
     try testing.expect(g.panUp());
+}
+
+test "the view sent off the map (from the minimap's corner) is put back on it" {
+    var g = try testGame();
+    defer g.deinit();
+    for ([_]f32{ 6, 14, max_zoom }) |z| {
+        g.camera.zoom = z;
+        for ([_][2]f32{ .{ -200, -200 }, .{ 700, 400 }, .{ 256, -150 }, .{ -40, 300 } }) |p| {
+            g.lookAt(p);
+            try testing.expect(g.viewFits(g.camera.target, g.camera.zoom));
+            // As far towards it as it can go: the edge reaching the screen's.
+            const towards = math.normalize(V3{ p[0], view_height, p[1] } - g.camera.target);
+            try testing.expect(!g.viewFits(g.camera.target + towards * math.splat(1), g.camera.zoom));
+        }
+    }
 }
 
 test "the view keeps to the map: its edge can reach the screen's, not come in from it" {
