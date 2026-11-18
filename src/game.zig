@@ -40,6 +40,8 @@ pub const fps_seconds = 30;
 
 /// This computer's player.
 pub const me: u2 = 0;
+/// The other player (not played by anything, yet).
+pub const enemy: u2 = 1;
 
 pub const Game = struct {
     gpa: std.mem.Allocator,
@@ -109,8 +111,10 @@ pub const Game = struct {
 
     /// A new game: this player's base, the view on it.
     pub fn newGame(g: *Game) void {
+        g.map.nav.clearBuildings();
         g.world.* = .{ .map = g.map };
         g.world.addBase(me);
+        g.world.addBase(enemy);
         g.fog.* = .{};
         g.fog.update(g.world, me);
         g.fog_age = 0;
@@ -375,6 +379,13 @@ pub const Game = struct {
             }
         }
         return best;
+    }
+
+    /// What is under the pointer (for highlighting what a click would
+    /// choose), unless a box is being dragged or a building placed.
+    pub fn hovered(g: *const Game) ?usize {
+        if (g.placing != null or g.dragBox() != null or g.menu_open) return null;
+        return g.thingAt(g.hover);
     }
 
     /// Whether a thing can be seen by this player: theirs, or in sight.
@@ -655,16 +666,16 @@ test "the fog of war: another player's unit hidden until one of this player's is
     g.closeMenu();
     const b = map_mod.bases[me];
     const there = [2]f32{ b[0] + 30, b[1] };
-    const enemy = g.world.add(.{ .kind = .tank, .team = 1, .pos = .{ there[0], 0, there[1] } }).?;
+    const theirs = g.world.add(.{ .kind = .tank, .team = enemy, .pos = .{ there[0], 0, there[1] } }).?;
     g.lookAt(there);
-    const at = g.onView(g.world.things[enemy].pos + V3{ 0, 0.4, 0 });
-    try testing.expect(!g.canSee(g.world.things[enemy]));
+    const at = g.onView(g.world.things[theirs].pos + V3{ 0, 0.4, 0 });
+    try testing.expect(!g.canSee(g.world.things[theirs]));
     try testing.expect(g.thingAt(at) == null);
     // One of this player's nearby: seen (once the fog is worked out).
-    _ = g.world.add(.{ .kind = .walker, .team = me, .pos = .{ there[0] - 4, 0, there[1] } }).?;
+    _ = g.world.add(.{ .kind = .walker, .team = me, .pos = .{ there[0] - 6, 0, there[1] + 3 } }).?;
     g.tick(fog_mod.every);
-    try testing.expect(g.canSee(g.world.things[enemy]));
-    try testing.expectEqual(@as(?usize, enemy), g.thingAt(at));
+    try testing.expect(g.canSee(g.world.things[theirs]));
+    try testing.expectEqual(@as(?usize, theirs), g.thingAt(at));
 }
 
 test "placing a building: a builder chosen, a building picked, the ground clicked" {

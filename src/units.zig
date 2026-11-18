@@ -5,6 +5,7 @@
 const std = @import("std");
 const math = @import("math.zig");
 const map_mod = @import("map.zig");
+const nav = @import("nav.zig");
 
 const V3 = math.V3;
 const Map = map_mod.Map;
@@ -51,6 +52,15 @@ pub const Kind = enum(u8) {
             .tank, .builder => 1.4,
             .air_builder => 1.3,
             else => 1,
+        };
+    }
+
+    /// How it finds its way (none: it flies straight).
+    pub fn navClass(k: Kind) ?nav.Class {
+        return switch (k) {
+            .walker => .foot,
+            .tank, .builder => .wheels,
+            else => null,
         };
     }
 
@@ -167,8 +177,13 @@ pub const Thing = struct {
     pos: V3,
     /// Which way it faces, right of north.
     yaw: f32 = 0,
-    /// Where it is going, if anywhere.
+    /// Where it is going, if anywhere: by way of `path`'s points from
+    /// `path_next` on (round what is in the way).
     goal: ?[2]f32 = null,
+    path: nav.Path = .{},
+    path_next: u8 = 0,
+    /// How many times it has looked for a way again (stuck), since sent.
+    replans: u8 = 0,
     /// How fast it is going now (it speeds up and slows down).
     moving: f32 = 0,
     /// Its legs', rotors' or drill's turn, for drawing them.
@@ -232,6 +247,7 @@ pub const World = struct {
         if (w.count == max_things) return null;
         var with = t;
         with.pos[1] = w.groundFor(t.kind, t.pos[0], t.pos[2]);
+        if (t.kind.isBuilding()) w.map.nav.building(t.pos[0], t.pos[2], t.kind.radius(), true);
         w.things[w.count] = with;
         w.count += 1;
         return w.count - 1;
@@ -317,6 +333,20 @@ pub const World = struct {
             widest = @max(widest, w.things[i].kind.radius());
         };
         const gap: f32 = @max(1.4, 2 * widest + 0.3);
+        // One way for each class (from the middle of those of it), shared.
+        var ways: [2]?nav.Path = .{ null, null };
+        for (std.enums.values(nav.Class)) |class| {
+            var mid: [2]f32 = .{ 0, 0 };
+            var m: f32 = 0;
+            for (which) |i| if (w.things[i].kind.navClass() == class) {
+                mid[0] += w.things[i].pos[0];
+                mid[1] += w.things[i].pos[2];
+                m += 1;
+            };
+            if (m == 0) continue;
+            var p: nav.Path = .{};
+            if (w.map.nav.find(class, .{ mid[0] / m, mid[1] / m }, .{ x, z }, &p)) ways[@intFromEnum(class)] = p;
+        }
         var k: usize = 0;
         for (which) |i| {
             const t = &w.things[i];
@@ -324,9 +354,51 @@ pub const World = struct {
             const col: f32 = @floatFromInt(k % across);
             const row: f32 = @floatFromInt(k / across);
             const half = @as(f32, @floatFromInt(across - 1)) / 2;
-            t.goal = .{ x + (col - half) * gap, z + (row - half) * gap };
+            const slot = [2]f32{ x + (col - half) * gap, z + (row - half) * gap };
             k += 1;
+            t.goal = slot;
+            t.replans = 0;
+            t.path = .{};
+            t.path_next = 0;
+            const class = t.kind.navClass() orelse continue;
+            const way = ways[@intFromEnum(class)] orelse continue;
+            // The shared way, from its point nearest this one (of the
+            // first few), to its own place at the end.
+            var start: usize = 0;
+            var best: f32 = std.math.inf(f32);
+            for (way.points[0..@min(way.len, 4)], 0..) |p, j| {
+                const d = (p[0] - t.pos[0]) * (p[0] - t.pos[0]) + (p[1] - t.pos[2]) * (p[1] - t.pos[2]);
+                if (d < best) {
+                    best = d;
+                    start = j;
+                }
+            }
+            for (way.points[start .. way.len - 1]) |p| {
+                t.path.points[t.path.len] = p;
+                t.path.len += 1;
+            }
         }
+    }
+
+    /// Sends unit `i` to `to`, finding its way.
+    pub fn send(w: *World, i: usize, to: [2]f32) void {
+        const t = &w.things[i];
+        t.goal = to;
+        t.replans = 0;
+        w.route(t);
+    }
+
+    /// Finds `t`'s way to its goal (none, flying: it goes straight).
+    fn route(w: *World, t: *Thing) void {
+        t.path = .{};
+        t.path_next = 0;
+        const goal = t.goal orelse return;
+        const class = t.kind.navClass() orelse return;
+        var p: nav.Path = .{};
+        if (!w.map.nav.find(class, .{ t.pos[0], t.pos[2] }, goal, &p)) return;
+        // (Its last point is the goal.)
+        if (p.len > 0) p.len -= 1;
+        t.path = p;
     }
 
     /// On by `dt` seconds.
@@ -354,7 +426,20 @@ pub const World = struct {
         const k = t.kind;
         var want: f32 = 0;
         var heading = t.yaw;
-        if (t.goal) |g| {
+        // On its way: to the next point of its way, on (not slowing) when
+        // near it; then to its goal.
+        while (t.path_next < t.path.len) {
+            const p = t.path.points[t.path_next];
+            const dx = p[0] - t.pos[0];
+            const dz = p[1] - t.pos[2];
+            if (dx * dx + dz * dz > 0.8 * 0.8) break;
+            t.path_next += 1;
+        }
+        if (t.path_next < t.path.len and t.goal != null) {
+            const p = t.path.points[t.path_next];
+            heading = std.math.atan2(p[0] - t.pos[0], -(p[1] - t.pos[2]));
+            want = k.speed();
+        } else if (t.goal) |g| {
             const dx = g[0] - t.pos[0];
             const dz = g[1] - t.pos[2];
             const d = @sqrt(dx * dx + dz * dz);
@@ -375,7 +460,7 @@ pub const World = struct {
             else => 5,
         };
         t.yaw = wrap(t.yaw + std.math.clamp(diff, -turn_rate * dt, turn_rate * dt));
-        if (k == .tank and @abs(diff) > 0.6) want = 0;
+        if ((k == .tank or k == .builder) and @abs(diff) > 0.6) want = 0;
         t.moving += (want - t.moving) * @min(1, 4 * dt);
         var nx = t.pos[0] + @sin(t.yaw) * t.moving * dt;
         var nz = t.pos[2] - @cos(t.yaw) * t.moving * dt;
@@ -402,6 +487,12 @@ pub const World = struct {
             t.pos[0] = nx;
         } else if (t.moving > 0.05 and w.canBe(k, t.pos[0], nz)) {
             t.pos[2] = nz;
+        } else if (t.goal != null and t.replans < 3) {
+            // Stuck (its way cut short, or a corner caught): a way from
+            // here, looked for again.
+            t.moving = 0;
+            t.replans += 1;
+            w.route(t);
         } else {
             t.moving = 0;
             t.goal = null;
@@ -462,7 +553,7 @@ pub const World = struct {
         if (!t.kind.builds()) return;
         t.order = o;
         t.site = null;
-        t.goal = o.at;
+        w.send(i, o.at);
     }
 
     /// Sends builder `i` to go on building `site` (one of its player's,
@@ -473,7 +564,7 @@ pub const World = struct {
         if (!t.kind.builds() or b.built >= 1 or b.team != t.team) return;
         t.order = .{ .kind = b.kind, .at = .{ b.pos[0], b.pos[2] }, .yaw = b.yaw };
         t.site = site;
-        t.goal = t.order.?.at;
+        w.send(i, t.order.?.at);
     }
 
     /// A builder's work: going to where it is to build; there, starting
@@ -487,7 +578,11 @@ pub const World = struct {
         const there = dx * dx + dz * dz <= reach * reach;
         if (!there) {
             // On its way (sent again, if it stopped).
-            if (t.goal == null) t.goal = o.at;
+            if (t.goal == null and t.replans < 3) {
+                t.goal = o.at;
+                t.replans += 1;
+                w.route(t);
+            }
             return;
         }
         t.goal = null;
@@ -568,7 +663,7 @@ pub const World = struct {
         const door = f.pos + fwd * math.splat(f.kind.radius() + 0.8);
         if (w.add(.{ .kind = k, .team = f.team, .pos = door, .yaw = f.yaw })) |i| {
             // (`f` may have moved: the list is not resized, so it has not.)
-            w.things[i].goal = f.rally;
+            w.send(i, f.rally);
         }
     }
 };
@@ -726,4 +821,38 @@ test "a building half built: does nothing until it is finished" {
     const before = w.resources[0].energy;
     w.step(1);
     try testing.expectEqual(before, w.resources[0].energy);
+}
+
+test "sent past a forest, a tank finds its way round it and gets there" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    const n = w.map.nav;
+    // A thick forest, with open ground either side.
+    var from: [2]f32 = undefined;
+    var to: [2]f32 = undefined;
+    var found = false;
+    var r: usize = map_mod.margin_rows + 60;
+    search: while (r < map_mod.rows - map_mod.margin_rows - 60) : (r += 3) {
+        for (map_mod.margin_cols + 60..map_mod.cols - map_mod.margin_cols - 60) |c| {
+            const t = w.map.treeAt(c, r) orelse continue;
+            if (map_mod.forestOf(1, t.at[0], t.at[2]) < 0.9) continue;
+            from = .{ t.at[0] - 20, t.at[2] };
+            to = .{ t.at[0] + 20, t.at[2] };
+            if (!n.openAt(.wheels, from[0], from[1]) or !n.openAt(.wheels, to[0], to[1])) continue;
+            found = true;
+            break :search;
+        }
+    }
+    try testing.expect(found);
+    for ([_]Kind{ .tank, .walker }) |k| {
+        w.count = 0;
+        const i = w.add(.{ .kind = k, .team = 0, .pos = .{ from[0], 0, from[1] } }).?;
+        w.moveTo(&.{i}, to[0], to[1]);
+        var t: f32 = 0;
+        while (t < 120 and w.things[i].goal != null) : (t += 1.0 / 30.0) w.step(1.0 / 30.0);
+        const p = w.things[i].pos;
+        try testing.expect(@abs(p[0] - to[0]) < 1 and @abs(p[2] - to[1]) < 1);
+    }
 }

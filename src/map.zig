@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const math = @import("math.zig");
+const nav_mod = @import("nav.zig");
 const mesh = @import("mesh.zig");
 
 const V3 = math.V3;
@@ -178,6 +179,8 @@ pub const Map = struct {
     heights: []i16,
     /// Which chunks' heights are made.
     made: []bool,
+    /// Finding ways across it.
+    nav: *nav_mod.Nav,
 
     pub fn create(gpa: std.mem.Allocator, seed: u32) !*Map {
         const m = try gpa.create(Map);
@@ -185,12 +188,15 @@ pub const Map = struct {
         const heights = try gpa.alloc(i16, rows * cols);
         errdefer gpa.free(heights);
         const made = try gpa.alloc(bool, chunks_x * chunks_z);
+        errdefer gpa.free(made);
         @memset(made, false);
-        m.* = .{ .seed = seed, .heights = heights, .made = made };
+        m.* = .{ .seed = seed, .heights = heights, .made = made, .nav = undefined };
+        m.nav = try nav_mod.Nav.create(gpa, m);
         return m;
     }
 
     pub fn destroy(m: *Map, gpa: std.mem.Allocator) void {
+        m.nav.destroy(gpa);
         gpa.free(m.heights);
         gpa.free(m.made);
         gpa.destroy(m);

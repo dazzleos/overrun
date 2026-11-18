@@ -54,6 +54,7 @@ const Scene = struct {
             g.view_jumped = false;
         }
         // The units and buildings in view, and the marks on the ground.
+        const hovered = g.hovered();
         var b: mesh.Builder = .{ .out = s.renderer.dynamicVertices() };
         for (g.world.things[0..g.world.count], 0..) |*t, i| {
             const r = t.kind.radius() + 0.3;
@@ -67,6 +68,12 @@ const Scene = struct {
                 models.thing(&b, &rising);
                 models.ring(&b, t.pos + V3{ 0, 0.06, 0 }, t.kind.radius() + 0.25, mesh.rgb(0xffd25a));
             } else models.thing(&b, t);
+            // Under the pointer (not already chosen): a faint ring, white
+            // for this player's, red for another's.
+            if (hovered == i and !g.isChosen(i)) {
+                const ground = if (t.kind.flies()) g.map.surfaceAt(t.pos[0], t.pos[2]) else t.pos[1];
+                models.ring(&b, .{ t.pos[0], ground + 0.06, t.pos[2] }, t.kind.radius() + 0.2, mesh.rgb(if (t.team == game_mod.me) 0xd8e4f0 else 0xf05e5e));
+            }
             // Where a builder is going to build.
             if (t.order) |o| if (t.site == null and t.team == game_mod.me) {
                 models.ring(&b, .{ o.at[0], g.map.surfaceAt(o.at[0], o.at[1]) + 0.06, o.at[1] }, o.kind.radius() + 0.25, mesh.rgb(0xffd25a));
@@ -202,6 +209,7 @@ test {
     _ = @import("minimap.zig");
     _ = @import("sky.zig");
     _ = @import("fog.zig");
+    _ = @import("nav.zig");
     _ = @import("units.zig");
     _ = @import("models.zig");
     _ = @import("renderer.zig");
