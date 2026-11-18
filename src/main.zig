@@ -154,7 +154,7 @@ fn run(init: std.process.Init) !void {
         if (now - log_since >= 10 * std.time.ns_per_s) {
             const st = renderer.stats;
             const fps = game.fps_history[game_mod.fps_seconds - 1];
-            print("overrun: {d:.1} fps; {d} units and buildings, {d} chunks, {d} draws, {d} triangles\n", .{ fps, game.world.count, st.chunks, st.draws, st.triangles });
+            print("overrun: {d:.1} fps; {d} units and buildings, {d} chunks, {d} draws, {d} triangles; {d} chunks on the GPU ({d} KB)\n", .{ fps, game.world.count, st.chunks, st.draws, st.triangles, st.kept, st.kept_bytes / 1024 });
             log_since = now;
         }
     }

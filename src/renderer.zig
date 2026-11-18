@@ -1,6 +1,12 @@
-//! Draws the battlefield: the ground (made once, in chunks, those out of
-//! view left out) and the units and buildings (made anew each frame, all
-//! in one buffer, one draw), all with one program (shaders/flat.zig).
+//! Draws the battlefield: the ground, in chunks, and the units and
+//! buildings (made anew each frame, all in one buffer, one draw), all with
+//! one program (shaders/flat.zig).
+//!
+//! The ground's chunks are on the GPU only while they are in view or near
+//! it: each made from the map's heights (kept in ordinary memory) as it
+//! comes into view, and let go of once it is well out of it, so the GPU's
+//! memory holds only what can be seen (about 2 MB), however large the
+//! map is.
 
 const std = @import("std");
 const vc4 = @import("vc4");
@@ -26,16 +32,26 @@ pub const Stats = struct {
     chunks: u32 = 0,
     draws: u32 = 0,
     triangles: u32 = 0,
+    /// Chunks on the GPU, and the memory they take.
+    kept: u32 = 0,
+    kept_bytes: usize = 0,
 };
 
-/// A chunk of ground: where its vertices are in the ground's buffer, and
-/// how high it goes (for knowing if it is in view).
+/// A chunk of ground: its triangles on the GPU (if it is in view, or was
+/// lately), and how high it goes (for knowing if it is in view).
 const Chunk = struct {
-    first: u32,
-    count: u32,
+    bo: ?vc4.Bo = null,
+    count: u32 = 0,
     lo: f32,
     hi: f32,
 };
+
+/// How many chunks are made in a frame (the rest in the frames after:
+/// they come into view a few at a time as the view moves).
+const made_per_frame = 6;
+/// How far out of view (in blocks) a chunk is kept before it is let go of
+/// (so one at the edge is not made and let go of again and again).
+const keep_past: f32 = 12;
 
 /// `Device`: vc4.Device, or a fake for tests.
 pub fn Renderer(comptime Device: type) type {
@@ -45,8 +61,13 @@ pub fn Renderer(comptime Device: type) type {
         gpa: std.mem.Allocator,
         dev: Device,
         flat: shader.Pipeline,
-        ground: vc4.Bo,
+        map: *const Map,
         chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk,
+        /// Where a chunk's triangles are made, before they go to the GPU.
+        scratch: []Vertex,
+        /// Every chunk in view made, however many (the first frame, and
+        /// after the view jumps).
+        all_now: bool = true,
         /// The units' and buildings' vertices, two buffers in turn (one may
         /// still be being drawn while the next is made).
         dynamic: [2]vc4.Bo,
@@ -63,36 +84,26 @@ pub fn Renderer(comptime Device: type) type {
                 .early_z = true,
             });
             errdefer flat.deinit(dev);
-            // The ground, chunk by chunk.
-            const per_chunk = Map.chunk_vertices;
-            const verts = try gpa.alloc(Vertex, per_chunk * map_mod.chunks_x * map_mod.chunks_z);
-            defer gpa.free(verts);
+            // How high each chunk goes (its triangles are made when it is
+            // in view).
             var chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk = undefined;
-            var at: usize = 0;
             for (0..map_mod.chunks_z) |cz| for (0..map_mod.chunks_x) |cx| {
-                const n = m.chunkMesh(cx, cz, verts[at..][0..per_chunk]);
-                var lo: f32 = std.math.inf(f32);
-                var hi: f32 = -std.math.inf(f32);
-                for (verts[at..][0..n]) |v| {
-                    lo = @min(lo, v.pos[1]);
-                    hi = @max(hi, v.pos[1]);
-                }
-                chunks[cz * map_mod.chunks_x + cx] = .{ .first = @intCast(at), .count = @intCast(n), .lo = lo, .hi = hi };
-                at += n;
+                const range = m.chunkHeights(cx, cz);
+                chunks[cz * map_mod.chunks_x + cx] = .{ .lo = @min(range[0], map_mod.water_level), .hi = range[1] };
             };
-            const ground = try dev.createBo(@intCast(at * @sizeOf(Vertex)));
-            errdefer dev.destroyBo(ground);
-            @memcpy(ground.map[0 .. at * @sizeOf(Vertex)], std.mem.sliceAsBytes(verts[0..at]));
+            const scratch = try gpa.alloc(Vertex, Map.chunk_vertices);
+            errdefer gpa.free(scratch);
             const d0 = try dev.createBo(max_dynamic * @sizeOf(Vertex));
             errdefer dev.destroyBo(d0);
             const d1 = try dev.createBo(max_dynamic * @sizeOf(Vertex));
-            r.* = .{ .gpa = gpa, .dev = dev, .flat = flat, .ground = ground, .chunks = chunks, .dynamic = .{ d0, d1 } };
+            r.* = .{ .gpa = gpa, .dev = dev, .flat = flat, .map = m, .chunks = chunks, .scratch = scratch, .dynamic = .{ d0, d1 } };
             return r;
         }
 
         pub fn deinit(r: *Self) void {
             r.flat.deinit(r.dev);
-            r.dev.destroyBo(r.ground);
+            for (&r.chunks) |*c| r.letGo(c);
+            r.gpa.free(r.scratch);
             for (r.dynamic) |bo| r.dev.destroyBo(bo);
             r.gpa.destroy(r);
         }
@@ -110,14 +121,51 @@ pub fn Renderer(comptime Device: type) type {
             r.stats = .{};
             const u: Uniforms = .{ .mvp = vp };
             r.flat.setUniforms(std.mem.asBytes(&u));
-            for (r.chunks, 0..) |c, i| {
-                if (c.count == 0) continue;
-                const bounds = Map.chunkBounds(i % map_mod.chunks_x, i / map_mod.chunks_x);
-                if (!inView(vp, .{ bounds[0][0], @min(c.lo, map_mod.water_level), bounds[0][1] }, .{ bounds[1][0], c.hi, bounds[1][1] })) continue;
+            var made: u32 = 0;
+            for (&r.chunks, 0..) |*c, i| {
+                const cx = i % map_mod.chunks_x;
+                const cz = i / map_mod.chunks_x;
+                const b = Map.chunkBounds(cx, cz);
+                const lo = V3{ b[0][0], c.lo, b[0][1] };
+                const hi = V3{ b[1][0], c.hi, b[1][1] };
+                if (!inView(vp, lo, hi)) {
+                    // Well out of view: let go of.
+                    const k = math.splat(keep_past);
+                    if (c.bo != null and !inView(vp, lo - k, hi + k)) r.letGo(c);
+                    continue;
+                }
+                if (c.bo == null) {
+                    // Come into view: made (a few a frame).
+                    if (!r.all_now and made >= made_per_frame) continue;
+                    r.make(c, cx, cz) catch continue;
+                    made += 1;
+                }
                 r.stats.chunks += 1;
-                try r.drawRange(sink, r.ground.handle, c.first, c.count, viewport, scissor);
+                if (c.count > 0) try r.drawRange(sink, c.bo.?.handle, 0, c.count, viewport, scissor);
             }
+            r.all_now = false;
+            for (r.chunks) |c| if (c.bo) |bo| {
+                r.stats.kept += 1;
+                r.stats.kept_bytes += bo.map.len;
+            };
             try r.drawRange(sink, r.dynamic[r.which].handle, 0, @intCast(dynamic), viewport, scissor);
+        }
+
+        /// Makes chunk (cx, cz)'s triangles, and puts them on the GPU.
+        fn make(r: *Self, c: *Chunk, cx: usize, cz: usize) !void {
+            const n = r.map.chunkMesh(cx, cz, r.scratch);
+            const bo = try r.dev.createBo(@intCast(@max(n, 3) * @sizeOf(Vertex)));
+            @memcpy(bo.map[0 .. n * @sizeOf(Vertex)], std.mem.sliceAsBytes(r.scratch[0..n]));
+            c.bo = bo;
+            c.count = @intCast(n);
+        }
+
+        /// Takes a chunk off the GPU (one still being drawn is kept by the
+        /// kernel until it has been).
+        fn letGo(r: *Self, c: *Chunk) void {
+            if (c.bo) |bo| r.dev.destroyBo(bo);
+            c.bo = null;
+            c.count = 0;
         }
 
         fn drawRange(r: *Self, sink: anytype, handle: u32, first: u32, count: u32, viewport: vc4.render.Viewport, scissor: ?vc4.render.Viewport) !void {

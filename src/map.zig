@@ -19,20 +19,24 @@ const V3 = math.V3;
 const Vertex = mesh.Vertex;
 
 /// Blocks across the hexagon that can be played on, east to west.
-pub const size = 96;
+pub const size = 256;
 /// How far apart the rows of corners are.
 pub const row_gap: f32 = 0.8660254;
 /// Corners, and rows of them, past the hexagon's square each way: the
 /// ground seen past its edge, in the view's corners (the view stops where
 /// the map's edge reaches the screen's: see game.zig's `viewFits`), up to
-/// 21 blocks past it, 24 past its corners. Each a whole number of chunks
+/// 29 blocks past it at the most. Each a whole number of chunks
 /// across, with the middle on an even row.
 pub const margin_cols = 32;
 pub const margin_rows = 32;
-/// Corners in a row, and rows: the hexagon's square (`size` across, 112
-/// rows down), and the margins.
+/// Rows from the middle to the top (or bottom) of the hexagon's square: a
+/// little more than the hexagon reaches (`radius`·√3/2 blocks), a multiple
+/// of 8 (so the rows are a whole number of chunks).
+pub const hex_rows_half = size / 2 + 8;
+/// Corners in a row, and rows: the hexagon's square (`size` across,
+/// 2·`hex_rows_half` rows down), and the margins.
 pub const cols = size + 2 * margin_cols + 1;
-pub const rows = 112 + 2 * margin_rows + 1;
+pub const rows = 2 * hex_rows_half + 2 * margin_rows + 1;
 /// The water's height: ground below it is under water (units on the
 /// ground cannot go there).
 pub const water_level: f32 = 0.6;
@@ -46,8 +50,8 @@ pub const chunks_z = (rows - 1) / chunk;
 /// its corners (east and west; its top and bottom edges are √3/2 of that
 /// from it).
 pub const centre_col = margin_cols + size / 2;
-pub const centre_row = margin_rows + 56;
-pub const centre = [2]f32{ size / 2, 56 * row_gap };
+pub const centre_row = margin_rows + hex_rows_half;
+pub const centre = [2]f32{ size / 2, hex_rows_half * row_gap };
 pub const radius: f32 = size / 2;
 
 /// Where each player's base is: towards four of the hexagon's corners,
@@ -202,6 +206,17 @@ pub const Map = struct {
             last = p;
         }
         return null;
+    }
+
+    /// How low and how high chunk (cx, cz)'s corners are.
+    pub fn chunkHeights(m: *const Map, cx: usize, cz: usize) [2]f32 {
+        var lo: f32 = std.math.inf(f32);
+        var hi: f32 = -std.math.inf(f32);
+        for (cz * chunk..(cz + 1) * chunk + 1) |r| for (cx * chunk..(cx + 1) * chunk + 1) |c| {
+            lo = @min(lo, m.corner(c, r));
+            hi = @max(hi, m.corner(c, r));
+        };
+        return .{ lo, hi };
     }
 
     /// The most vertices a chunk is (its triangles, and water over each).

@@ -489,13 +489,14 @@ test "the view keeps to the map: its edge can reach the screen's, not come in fr
         for ([_][2]f32{ .{ 1, 0 }, .{ -1, 0 }, .{ 0, 1 }, .{ 0, -1 }, .{ 0.7, 0.7 } }) |d| {
             for (0..400) |_| g.moveView(.{ d[0], d[1] });
             try testing.expect(g.viewFits(g.camera.target, g.camera.zoom));
-            // The screen's corners past the map no further than the
-            // ground past it reaches.
+            // The screen's corners on the ground (which reaches past the
+            // map's edge: see map.zig's margins).
+            const first = Map.at(0, 0);
+            const last = Map.at(map_mod.cols - 1, map_mod.rows - 1);
             for ([_][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ -1, 1 }, .{ 1, 1 } }) |c| {
                 const p = g.groundOfView(g.camera.target, g.camera.zoom, c[0], c[1]);
-                // (The ground past the map reaches 24 blocks or more from
-                // each edge: see map.zig.)
-                try testing.expect(-map_mod.inside(p[0], p[1]) < 24);
+                try testing.expect(p[0] > first[0] + 1 and p[0] < last[0] - 1);
+                try testing.expect(p[1] > first[1] + 1 and p[1] < last[1] - 1);
             }
         }
     }
