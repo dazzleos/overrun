@@ -15,6 +15,7 @@ const shader = @import("shader");
 const math = @import("math.zig");
 const mesh = @import("mesh.zig");
 const map_mod = @import("map.zig");
+const fog_mod = @import("fog.zig");
 
 const Vertex = mesh.Vertex;
 const V3 = math.V3;
@@ -28,6 +29,17 @@ const max_per_draw = 3 * 20000;
 const Uniforms = extern struct {
     mvp: math.Mat4,
     tint: [4]f32,
+    fog: [4]f32,
+};
+
+/// The fog's picture, as the GPU samples it: smoothly, and clamped at its
+/// edges.
+const fog_config: vc4.texture.Config = .{
+    .type = vc4.Format.a8.textureType(),
+    .width = fog_mod.size,
+    .height = fog_mod.size,
+    .wrap_s = .clamp,
+    .wrap_t = .clamp,
 };
 
 /// How a frame is seen: `vp` (world to clip space), what of the ground can
@@ -81,6 +93,9 @@ pub fn Renderer(comptime Device: type) type {
         /// Every chunk in view made, however many (the first frame, and
         /// after the view jumps: see `makeAllNow`).
         all_now: bool = true,
+        /// The fog of war's picture, and which of its versions it has.
+        fog: vc4.Bo,
+        fog_version: ?u32 = null,
         /// The units' and buildings' vertices, two buffers in turn (one may
         /// still be being drawn while the next is made).
         dynamic: [2]vc4.Bo,
@@ -100,10 +115,12 @@ pub fn Renderer(comptime Device: type) type {
             const chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk = @splat(.{});
             const scratch = try gpa.alloc(Vertex, Map.chunk_vertices);
             errdefer gpa.free(scratch);
+            const fog = try dev.createBo(vc4.texture.imageSizeOf(.a8, fog_mod.size, fog_mod.size));
+            errdefer dev.destroyBo(fog);
             const d0 = try dev.createBo(max_dynamic * @sizeOf(Vertex));
             errdefer dev.destroyBo(d0);
             const d1 = try dev.createBo(max_dynamic * @sizeOf(Vertex));
-            r.* = .{ .gpa = gpa, .dev = dev, .flat = flat, .map = m, .chunks = chunks, .scratch = scratch, .dynamic = .{ d0, d1 } };
+            r.* = .{ .gpa = gpa, .dev = dev, .flat = flat, .map = m, .chunks = chunks, .scratch = scratch, .fog = fog, .dynamic = .{ d0, d1 } };
             return r;
         }
 
@@ -113,6 +130,7 @@ pub fn Renderer(comptime Device: type) type {
             r.kept.deinit(r.gpa);
             r.gpa.free(r.scratch);
             for (r.dynamic) |bo| r.dev.destroyBo(bo);
+            r.dev.destroyBo(r.fog);
             r.gpa.destroy(r);
         }
 
@@ -120,6 +138,14 @@ pub fn Renderer(comptime Device: type) type {
         /// (rather than showing it a few chunks at a time).
         pub fn makeAllNow(r: *Self) void {
             r.all_now = true;
+        }
+
+        /// The fog of war as `f` has it now (copied to the GPU if it has
+        /// changed).
+        pub fn setFog(r: *Self, f: *const fog_mod.Fog) void {
+            if (r.fog_version == f.version) return;
+            vc4.texture.uploadRectOf(.a8, r.fog.map, fog_mod.size, fog_mod.size, .{ .x = 0, .y = 0, .width = fog_mod.size, .height = fog_mod.size }, &f.light, fog_mod.size);
+            r.fog_version = f.version;
         }
 
         /// The next frame's buffer for units and buildings, to make them in.
@@ -135,7 +161,11 @@ pub fn Renderer(comptime Device: type) type {
             const vp = look.vp;
             const ground = look.ground;
             r.stats = .{};
-            const u: Uniforms = .{ .mvp = vp, .tint = .{ look.tint[0], look.tint[1], look.tint[2], 1 } };
+            const u: Uniforms = .{
+                .mvp = vp,
+                .tint = .{ look.tint[0], look.tint[1], look.tint[2], 1 },
+                .fog = .{ 1 / fog_mod.span, -fog_mod.origin / fog_mod.span, 0, 0 },
+            };
             r.flat.setUniforms(std.mem.asBytes(&u));
             // Those well out of view let go of.
             const keep = chunksIn(ground, keep_past);
@@ -208,6 +238,7 @@ pub fn Renderer(comptime Device: type) type {
                     .vertices = handle,
                     .vertex_offset = (first + done) * @sizeOf(Vertex),
                     .count = n,
+                    .texture = .{ .handle = r.fog.handle, .config = fog_config },
                     .viewport = viewport,
                     .scissor = scissor,
                 });

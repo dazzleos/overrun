@@ -13,6 +13,7 @@
 const std = @import("std");
 const kete = @import("kete");
 const minimap_mod = @import("minimap.zig");
+const fog_mod = @import("fog.zig");
 const math = @import("math.zig");
 const map_mod = @import("map.zig");
 const units = @import("units.zig");
@@ -45,6 +46,10 @@ pub const Game = struct {
     map: *Map,
     world: *World,
     minimap: *minimap_mod.Minimap,
+    /// What this player sees, and has seen.
+    fog: *fog_mod.Fog,
+    /// Seconds since the fog was last worked out.
+    fog_age: f32 = 0,
     /// The left button held on the minimap (the view follows it).
     minimap_held: bool = false,
     /// The view follows what is chosen (F).
@@ -81,9 +86,11 @@ pub const Game = struct {
         errdefer m.destroy(gpa);
         const mm = try minimap_mod.Minimap.create(gpa, seed);
         errdefer mm.destroy(gpa);
+        const f = try gpa.create(fog_mod.Fog);
+        errdefer gpa.destroy(f);
         const w = try gpa.create(World);
         w.* = .{ .map = m };
-        var g: Game = .{ .gpa = gpa, .map = m, .world = w, .minimap = mm, .camera = .{ .target = .{ 0, 0, 0 } } };
+        var g: Game = .{ .gpa = gpa, .map = m, .world = w, .minimap = mm, .fog = f, .camera = .{ .target = .{ 0, 0, 0 } } };
         g.newGame();
         return g;
     }
@@ -92,6 +99,7 @@ pub const Game = struct {
         g.chosen.deinit(g.gpa);
         g.gpa.destroy(g.world);
         g.minimap.destroy(g.gpa);
+        g.gpa.destroy(g.fog);
         g.map.destroy(g.gpa);
     }
 
@@ -99,6 +107,9 @@ pub const Game = struct {
     pub fn newGame(g: *Game) void {
         g.world.* = .{ .map = g.map };
         g.world.addBase(me);
+        g.fog.* = .{};
+        g.fog.update(g.world, me);
+        g.fog_age = 0;
         g.chosen.clearRetainingCapacity();
         const b = map_mod.bases[me];
         g.camera.target = .{ b[0] + 4, view_height, b[1] + 4 };
@@ -145,6 +156,11 @@ pub const Game = struct {
     pub fn tick(g: *Game, dt: f32) void {
         if (g.menu_open) return;
         g.world.step(dt);
+        g.fog_age += dt;
+        if (g.fog_age >= fog_mod.every) {
+            g.fog.update(g.world, me);
+            g.fog_age = 0;
+        }
         var dx: f32 = 0;
         var dz: f32 = 0;
         if (g.keys.contains(.left) or g.keys.contains(.a)) dx -= 1;
@@ -338,6 +354,7 @@ pub const Game = struct {
         var best_d: f32 = std.math.inf(f32);
         const per_block = g.view_size[1] / (2 * g.camera.zoom);
         for (g.world.things[0..g.world.count], 0..) |t, i| {
+            if (!g.canSee(t)) continue;
             const foot = g.onView(t.pos);
             const top = g.onView(t.pos + V3{ 0, t.kind.height(), 0 });
             const r = @max(t.kind.radius() * per_block, 10);
@@ -350,6 +367,11 @@ pub const Game = struct {
             }
         }
         return best;
+    }
+
+    /// Whether a thing can be seen by this player: theirs, or in sight.
+    pub fn canSee(g: *const Game, t: units.Thing) bool {
+        return t.team == me or g.fog.sees(t.pos[0], t.pos[2]);
     }
 
     pub fn isChosen(g: *const Game, i: usize) bool {
@@ -561,6 +583,25 @@ test "dragging with the right button moves the view, the ground following the po
     g.panDown(.{ 600, 400 });
     g.panMoved(.{ 602, 401 });
     try testing.expect(g.panUp());
+}
+
+test "the fog of war: another player's unit hidden until one of this player's is near" {
+    var g = try testGame();
+    defer g.deinit();
+    g.view_size = .{ 1280, 720 };
+    g.closeMenu();
+    const b = map_mod.bases[me];
+    const there = [2]f32{ b[0] + 30, b[1] };
+    const enemy = g.world.add(.{ .kind = .tank, .team = 1, .pos = .{ there[0], 0, there[1] } }).?;
+    g.lookAt(there);
+    const at = g.onView(g.world.things[enemy].pos + V3{ 0, 0.4, 0 });
+    try testing.expect(!g.canSee(g.world.things[enemy]));
+    try testing.expect(g.thingAt(at) == null);
+    // One of this player's nearby: seen (once the fog is worked out).
+    _ = g.world.add(.{ .kind = .walker, .team = me, .pos = .{ there[0] - 4, 0, there[1] } }).?;
+    g.tick(fog_mod.every);
+    try testing.expect(g.canSee(g.world.things[enemy]));
+    try testing.expectEqual(@as(?usize, enemy), g.thingAt(at));
 }
 
 test "a double click on a unit chooses all of its kind on the screen" {

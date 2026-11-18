@@ -11,6 +11,7 @@ const game_mod = @import("game.zig");
 const units = @import("units.zig");
 const minimap = @import("minimap.zig");
 const sky = @import("sky.zig");
+const fog_mod = @import("fog.zig");
 const font = kete.font;
 
 const Game = game_mod.Game;
@@ -225,8 +226,18 @@ const Minimap = struct {
             q.* = .{ at_[0], at_[1], uv[0], uv[1] };
         }
         c.drawImageTriangles(&g.minimap.image, &.{ quad[0], quad[1], quad[2], quad[0], quad[2], quad[3] }, 1);
-        // The units (small) and buildings (larger), in their teams' colours.
+        // The fog of war over it.
+        g.minimap.setFog(g.fog);
+        var fog: [4][4]f32 = undefined;
+        for (&fog, [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } }) |*q, uv| {
+            const at_ = self.at(.{ fog_mod.origin + uv[0] * fog_mod.span, fog_mod.origin + uv[1] * fog_mod.span });
+            q.* = .{ at_[0], at_[1], uv[0], uv[1] };
+        }
+        c.drawImageTriangles(&g.minimap.fog_image, &.{ fog[0], fog[1], fog[2], fog[0], fog[2], fog[3] }, 1);
+        // The units (small) and buildings (larger), in their teams' colours:
+        // others' only where they can be seen.
         for (g.world.all()) |t| {
+            if (!g.canSee(t)) continue;
             const q = self.at(.{ t.pos[0], t.pos[2] });
             const s: f32 = if (t.kind.isBuilding()) 4 else 2.5;
             c.fillRect(.{ .x = q[0] - s / 2, .y = q[1] - s / 2, .w = s, .h = s }, gfx.Color.rgb(units.team_colours[t.team]));

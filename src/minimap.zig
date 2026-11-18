@@ -7,6 +7,7 @@ const kete = @import("kete");
 const math = @import("math.zig");
 const mesh = @import("mesh.zig");
 const map_mod = @import("map.zig");
+const fog_mod = @import("fog.zig");
 
 /// Its size, in pixels: the hexagon's square.
 pub const width = 200;
@@ -19,6 +20,13 @@ const origin = [2]f32{ map_mod.centre[0] - map_mod.radius, map_mod.centre[1] - m
 pub const Minimap = struct {
     pixels: [width * height]u32,
     image: kete.gfx.Image,
+    /// The fog of war over it: black, as dark as the fog (none past the
+    /// hexagon), and which of the fog's versions it shows.
+    fog_pixels: [fog_mod.size * fog_mod.size]u32,
+    fog_image: kete.gfx.Image,
+    fog_version: ?u32 = null,
+    /// Which of the fog's texels are on the hexagon.
+    on_map: [fog_mod.size * fog_mod.size]bool,
 
     /// Makes the map's (made from `seed`).
     pub fn create(gpa: std.mem.Allocator, seed: u32) !*Minimap {
@@ -53,7 +61,23 @@ pub const Minimap = struct {
             mm.pixels[y * width + x] = argb(c, alpha);
         };
         mm.image = .init(&mm.pixels, width, height);
+        for (0..fog_mod.size) |y| for (0..fog_mod.size) |x| {
+            const k = fog_mod.span / fog_mod.size;
+            const at = [2]f32{ fog_mod.origin + (@as(f32, @floatFromInt(x)) + 0.5) * k, fog_mod.origin + (@as(f32, @floatFromInt(y)) + 0.5) * k };
+            mm.on_map[y * fog_mod.size + x] = map_mod.inside(at[0], at[1]) > -k / 2;
+        };
+        @memset(&mm.fog_pixels, 0);
+        mm.fog_image = .init(&mm.fog_pixels, fog_mod.size, fog_mod.size);
+        mm.fog_version = null;
         return mm;
+    }
+
+    /// The fog over it as `f` has it now.
+    pub fn setFog(mm: *Minimap, f: *const fog_mod.Fog) void {
+        if (mm.fog_version == f.version) return;
+        for (&mm.fog_pixels, f.light, mm.on_map) |*p, l, on| p.* = if (on) @as(u32, 255 - l) << 24 else 0;
+        mm.fog_image.changed();
+        mm.fog_version = f.version;
     }
 
     pub fn destroy(mm: *Minimap, gpa: std.mem.Allocator) void {

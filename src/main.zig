@@ -58,6 +58,7 @@ const Scene = struct {
             const r = t.kind.radius() + 0.3;
             const top = t.pos + V3{ 0, t.kind.height(), 0 };
             if (!renderer_mod.inView(m, t.pos - V3{ r, 0, r }, top + V3{ r, 0, r })) continue;
+            if (!g.canSee(t.*)) continue;
             models.thing(&b, t);
             if (g.isChosen(i)) {
                 const ground = if (t.kind.flies()) g.map.surfaceAt(t.pos[0], t.pos[2]) else t.pos[1];
@@ -68,6 +69,7 @@ const Scene = struct {
             const age = g.world.time - sent.time;
             if (age < 0.8) models.ring(&b, sent.at + V3{ 0, 0.06, 0 }, 0.3 + age, mesh.rgb(0xffd25a));
         }
+        s.renderer.setFog(g.fog);
         // The weather: rain, and the light.
         const time = g.world.time;
         const weather = sky.weatherAt(g.map.seed, time);
@@ -180,6 +182,7 @@ test {
     _ = @import("map.zig");
     _ = @import("minimap.zig");
     _ = @import("sky.zig");
+    _ = @import("fog.zig");
     _ = @import("units.zig");
     _ = @import("models.zig");
     _ = @import("renderer.zig");
