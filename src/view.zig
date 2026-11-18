@@ -12,6 +12,7 @@ const units = @import("units.zig");
 const font = kete.font;
 
 const Game = game_mod.Game;
+const math = @import("math.zig");
 const Kind = units.Kind;
 
 pub const min_size = [2]u32{ 640, 400 };
@@ -214,7 +215,8 @@ const Battlefield = struct {
                 g.zoom(if (s.dy > 0) 1.12 else 1.0 / 1.12);
                 return true;
             },
-            .context => return true,
+            // (Not taken as a context menu's: the right button's press
+            // comes next, which moves the view.)
             else => {},
         }
         return false;
@@ -333,6 +335,23 @@ test "the view fits, menu or not, from the smallest window up" {
             try testing.expect(!overflows(u.root.?));
         }
     }
+}
+
+test "dragging with the right button moves the view" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    var g = try Game.init(testing.allocator, 1);
+    defer g.deinit();
+    g.closeMenu();
+    const view: Overrun = .{ .game = &g };
+    u.frame(1280, 720, 0, view);
+    const before = g.camera.target;
+    u.pointerMotion(.{ 640, 360 });
+    u.pointerButton(.{ 640, 360 }, .right, true);
+    for (1..10) |i| u.pointerMotion(.{ 640 + @as(f32, @floatFromInt(i)) * 20, 360 });
+    u.pointerButton(.{ 820, 360 }, .right, false);
+    try testing.expect(math.length(g.camera.target - before) > 1);
 }
 
 fn overflows(node: *kete.WidgetNode) bool {
