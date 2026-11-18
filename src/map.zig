@@ -341,6 +341,25 @@ pub const Map = struct {
         };
     }
 
+    /// Whether a tree is within `r` blocks of (x, z) (of its trunk).
+    pub fn treeNear(m: *const Map, x: f32, z: f32, r: f32) bool {
+        // Most of the map has no forest: none looked for.
+        if (forestOf(m.seed, x, z) <= 0 and forestOf(m.seed, x + 1.5, z + 1.5) <= 0 and forestOf(m.seed, x - 1.5, z - 1.5) <= 0) return false;
+        const row = @floor(z / row_gap) + margin_rows;
+        const col = @floor(x) + margin_cols;
+        if (row < 2 or col < 2 or row > rows - 3 or col > cols - 3) return false;
+        const r0: usize = @intFromFloat(row);
+        const c0: usize = @intFromFloat(col);
+        const reach = r + 0.3;
+        for (r0 - 2..r0 + 2) |rr| for (c0 - 2..c0 + 2) |cc| {
+            const t = m.treeAt(cc, rr) orelse continue;
+            const dx = t.at[0] - x;
+            const dz = t.at[2] - z;
+            if (dx * dx + dz * dz < reach * reach) return true;
+        };
+        return false;
+    }
+
     /// How low and how high chunk (cx, cz)'s corners are.
     pub fn chunkHeights(m: *const Map, cx: usize, cz: usize) [2]f32 {
         var lo: f32 = std.math.inf(f32);

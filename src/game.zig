@@ -54,6 +54,10 @@ pub const Game = struct {
     minimap_held: bool = false,
     /// The view follows what is chosen (F).
     following: bool = false,
+    /// A building being placed (for the builders chosen to build), and
+    /// where the pointer is (where it would go).
+    placing: ?units.Kind = null,
+    hover: kete.Point = .{ 0, 0 },
     /// The view jumped (from the minimap): all the ground in view is to be
     /// made at once, not a few chunks a frame.
     view_jumped: bool = false,
@@ -210,6 +214,10 @@ pub const Game = struct {
         if (k == .left_shift or k == .right_shift) g.shift = pressed;
         if (!pressed) return;
         if (k == .escape) {
+            if (g.placing != null) {
+                g.placing = null;
+                return;
+            }
             if (g.menu_open) g.closeMenu() else g.openMenu();
         }
         if (k == .f and !g.menu_open) g.toggleFollowing();
@@ -382,7 +390,53 @@ pub const Game = struct {
     pub fn chosenFactory(g: *const Game) ?usize {
         if (g.chosen.items.len != 1) return null;
         const i = g.chosen.items[0];
-        return if (g.world.things[i].kind == .factory) i else null;
+        const t = g.world.things[i];
+        return if (t.kind == .factory and t.built >= 1) i else null;
+    }
+
+    /// Whether any builders are chosen.
+    pub fn buildersChosen(g: *const Game) bool {
+        for (g.chosen.items) |i| if (g.world.things[i].kind.builds()) return true;
+        return false;
+    }
+
+    /// Starts placing a `k`, for the builders chosen to build.
+    pub fn startPlacing(g: *Game, k: units.Kind) void {
+        if (g.buildersChosen()) g.placing = k;
+    }
+
+    /// Where the building being placed would go (under the pointer), and
+    /// whether it can.
+    pub fn ghost(g: *const Game) ?struct { kind: units.Kind, at: V3, ok: bool } {
+        const k = g.placing orelse return null;
+        const at = g.groundAt(g.hover) orelse return null;
+        return .{ .kind = k, .at = at, .ok = g.world.canPlace(k, at[0], at[2]) };
+    }
+
+    /// The building being placed put at `p`, if it can be: the nearest of
+    /// the chosen builders (one with nothing to do first) sent to build
+    /// it. With Shift, more can be placed.
+    fn place(g: *Game, p: kete.Point) void {
+        const k = g.placing orelse return;
+        const at = g.groundAt(p) orelse return;
+        if (!g.world.canPlace(k, at[0], at[2])) return;
+        var best: ?usize = null;
+        var best_d: f32 = std.math.inf(f32);
+        for (g.chosen.items) |i| {
+            const t = g.world.things[i];
+            if (!t.kind.builds()) continue;
+            const d = (t.pos[0] - at[0]) * (t.pos[0] - at[0]) + (t.pos[2] - at[2]) * (t.pos[2] - at[2]) + (if (t.order != null) @as(f32, 1e6) else 0);
+            if (d < best_d) {
+                best_d = d;
+                best = i;
+            }
+        }
+        const b = best orelse return;
+        // Facing the map's middle.
+        const yaw = std.math.atan2(map_mod.centre[0] - at[0], -(map_mod.centre[1] - at[2]));
+        g.world.orderBuild(b, .{ .kind = k, .at = .{ at[0], at[2] }, .yaw = yaw });
+        g.sent = .{ .at = at, .time = g.world.time };
+        if (!g.shift) g.placing = null;
     }
 
     pub fn pointerDown(g: *Game, p: kete.Point) void {
@@ -409,6 +463,7 @@ pub const Game = struct {
     }
 
     pub fn pointerMoved(g: *Game, p: kete.Point) void {
+        g.hover = p;
         if (g.press) |*pr| {
             pr.now = p;
             if (@abs(p[0] - pr.at[0]) + @abs(p[1] - pr.at[1]) > drag_threshold) pr.dragging = true;
@@ -418,7 +473,7 @@ pub const Game = struct {
     pub fn pointerUp(g: *Game, p: kete.Point) void {
         const pr = g.press orelse return;
         g.press = null;
-        if (pr.dragging) return g.chooseIn(pr.at, p);
+        if (pr.dragging and g.placing == null) return g.chooseIn(pr.at, p);
         g.click(p);
     }
 
@@ -430,8 +485,16 @@ pub const Game = struct {
     }
 
     pub fn click(g: *Game, p: kete.Point) void {
+        if (g.placing != null) return g.place(p);
         if (g.thingAt(p)) |i| {
             const t = g.world.things[i];
+            // One of this player's, not yet built, with builders chosen:
+            // they go on building it.
+            if (t.team == me and t.built < 1 and g.buildersChosen()) {
+                for (g.chosen.items) |b| g.world.orderResume(b, i);
+                g.sent = .{ .at = t.pos, .time = g.world.time };
+                return;
+            }
             // Another player's: units chosen go to it.
             if (t.team != me) {
                 if (g.hasUnitsChosen()) g.sendTo(t.pos);
@@ -602,6 +665,43 @@ test "the fog of war: another player's unit hidden until one of this player's is
     g.tick(fog_mod.every);
     try testing.expect(g.canSee(g.world.things[enemy]));
     try testing.expectEqual(@as(?usize, enemy), g.thingAt(at));
+}
+
+test "placing a building: a builder chosen, a building picked, the ground clicked" {
+    var g = try testGame();
+    defer g.deinit();
+    g.view_size = .{ 1280, 720 };
+    g.closeMenu();
+    const b = map_mod.bases[me];
+    const i = g.world.add(.{ .kind = .builder, .team = me, .pos = .{ b[0] + 3, 0, b[1] + 6 } }).?;
+    // Nothing to build with: nothing placed.
+    g.startPlacing(.power);
+    try testing.expect(g.placing == null);
+    g.chosen.append(testing.allocator, i) catch {};
+    g.startPlacing(.power);
+    try testing.expectEqual(@as(?units.Kind, .power), g.placing);
+    // Esc: stopped.
+    g.key(.escape, true);
+    g.key(.escape, false);
+    try testing.expect(g.placing == null and !g.menu_open);
+    g.startPlacing(.power);
+    // Clicked where it can go: the builder sent to build it there.
+    g.lookAt(.{ b[0] + 8, b[1] + 8 });
+    var spot: ?kete.Point = null;
+    var y: f32 = 100;
+    while (y < 700 and spot == null) : (y += 40) {
+        var x: f32 = 100;
+        while (x < 1200) : (x += 40) {
+            const at = g.groundAt(.{ x, y }) orelse continue;
+            if (g.world.canPlace(.power, at[0], at[2])) {
+                spot = .{ x, y };
+                break;
+            }
+        }
+    }
+    g.click(spot.?);
+    try testing.expect(g.placing == null);
+    try testing.expectEqual(units.Kind.power, g.world.things[i].order.?.kind);
 }
 
 test "a double click on a unit chooses all of its kind on the screen" {

@@ -18,6 +18,7 @@ const models = @import("models.zig");
 const game_mod = @import("game.zig");
 const renderer_mod = @import("renderer.zig");
 const view = @import("view.zig");
+const units = @import("units.zig");
 const sky = @import("sky.zig");
 
 const print = sys.print;
@@ -59,11 +60,29 @@ const Scene = struct {
             const top = t.pos + V3{ 0, t.kind.height(), 0 };
             if (!renderer_mod.inView(m, t.pos - V3{ r, 0, r }, top + V3{ r, 0, r })) continue;
             if (!g.canSee(t.*)) continue;
-            models.thing(&b, t);
+            if (t.built < 1) {
+                // Being built: rising out of the ground.
+                var rising = t.*;
+                rising.pos[1] -= (1 - t.built) * t.kind.height();
+                models.thing(&b, &rising);
+                models.ring(&b, t.pos + V3{ 0, 0.06, 0 }, t.kind.radius() + 0.25, mesh.rgb(0xffd25a));
+            } else models.thing(&b, t);
+            // Where a builder is going to build.
+            if (t.order) |o| if (t.site == null and t.team == game_mod.me) {
+                models.ring(&b, .{ o.at[0], g.map.surfaceAt(o.at[0], o.at[1]) + 0.06, o.at[1] }, o.kind.radius() + 0.25, mesh.rgb(0xffd25a));
+            };
             if (g.isChosen(i)) {
                 const ground = if (t.kind.flies()) g.map.surfaceAt(t.pos[0], t.pos[2]) else t.pos[1];
                 models.ring(&b, .{ t.pos[0], ground + 0.06, t.pos[2] }, t.kind.radius() + 0.2, mesh.rgb(0x5ef08a));
             }
+        }
+        // The building being placed, under the pointer: green where it can
+        // go, red where not.
+        if (g.ghost()) |gh| {
+            const yaw = std.math.atan2(map_mod.centre[0] - gh.at[0], -(map_mod.centre[1] - gh.at[2]));
+            const t: units.Thing = .{ .kind = gh.kind, .team = game_mod.me, .pos = gh.at, .yaw = yaw };
+            models.thing(&b, &t);
+            models.ring(&b, gh.at + V3{ 0, 0.06, 0 }, gh.kind.radius() + 0.3, mesh.rgb(if (gh.ok) 0x5ef08a else 0xf05e5e));
         }
         if (g.sent) |sent| {
             const age = g.world.time - sent.time;

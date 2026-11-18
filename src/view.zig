@@ -88,7 +88,8 @@ fn resources(cx: *kete.BuildContext, g: *Game) kete.Widget {
     }) }) });
 }
 
-/// What is chosen, at the bottom: a factory's panel, or how many units.
+/// What is chosen, at the bottom: a factory's panel (what it makes), the
+/// builders' (what they build), or how many units.
 fn chosenPanel(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
     const a = cx.arena;
     if (g.chosenFactory()) |fi| {
@@ -98,27 +99,21 @@ fn chosenPanel(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
             const q = a.create(Queue) catch continue;
             q.* = .{ .game = g, .kind = k };
             const n = f.queuedOf(k);
-            const c = k.cost();
             const making = f.making() == k;
-            cells.append(a, cx.make(kete.Pressable{ .on_press = .of(q, Queue.add), .child = cx.make(kete.RoundedBox{
-                .color = gfx.Color.argb(if (n > 0) 0xcc303848 else 0x99000000),
-                .border_width = if (making) 2 else 1,
-                .border_color = gfx.Color.argb(if (making) 0xffffd25a else 0x66ffffff),
-                .radius = .all(8),
-                .child = cx.make(kete.SizedBox{ .width = 120, .child = cx.make(kete.Padding{ .padding = .all(8), .child = cx.make(kete.Column{ .fill = false, .spacing = 2, .cross_axis_alignment = .start, .children = a.dupe(kete.Widget, &.{
-                    cx.make(kete.Row{ .fill = false, .spacing = 6, .children = a.dupe(kete.Widget, &.{
-                        cx.make(kete.Icon{ .icon = iconOf(k), .size = 22, .color = gfx.Color.argb(0xffffffff) }),
-                        label(cx, k.name(), 16),
-                    }) catch &.{} }),
-                    label(cx, cx.fmt("{d:.0} metal, {d:.0} energy", .{ c.metal, c.energy }), 11),
-                    label(cx, if (n == 0) "" else if (making) cx.fmt("{d} queued, {d:.0}%", .{ n, f.progress * 100 }) else cx.fmt("{d} queued", .{n}), 13),
-                }) catch &.{} }) }) }),
-            }) })) catch {};
+            const note = if (n == 0) "" else if (making) cx.fmt("{d} queued, {d:.0}%", .{ n, f.progress * 100 }) else cx.fmt("{d} queued", .{n});
+            cells.append(a, kindCell(cx, k, n > 0, making, note, .of(q, Queue.add))) catch {};
         }
-        return cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(12), .child = cx.make(kete.Padding{ .padding = .all(10), .child = cx.make(kete.Column{ .fill = false, .spacing = 8, .children = a.dupe(kete.Widget, &.{
-            label(cx, "Factory: click to queue, right-click to take one out", 14),
-            cx.make(kete.Row{ .fill = false, .spacing = 8, .children = cells.items }),
-        }) catch &.{} }) }) });
+        return panel(cx, "Factory: click to queue, right-click to take one out", cells.items);
+    }
+    if (g.buildersChosen()) {
+        var cells: std.ArrayList(kete.Widget) = .empty;
+        for (units.constructible) |k| {
+            const q = a.create(Place) catch continue;
+            q.* = .{ .game = g, .kind = k };
+            const placing = g.placing == k;
+            cells.append(a, kindCell(cx, k, placing, placing, if (placing) "Click where" else "", .of(q, Place.start))) catch {};
+        }
+        return panel(cx, if (g.placing != null) "Click where to build (Shift for more), right-click to stop" else "Builder: choose what to build", cells.items);
     }
     if (g.chosen.items.len == 0) return null;
     const t = g.world.things[g.chosen.items[0]];
@@ -126,9 +121,44 @@ fn chosenPanel(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
     return cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(10), .child = cx.make(kete.Padding{ .padding = .{ .left = 14, .top = 8, .right = 14, .bottom = 8 }, .child = label(cx, text, 16) }) });
 }
 
+/// A panel of cells, under a title.
+fn panel(cx: *kete.BuildContext, title: []const u8, cells: []const kete.Widget) kete.Widget {
+    const a = cx.arena;
+    return cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(12), .child = cx.make(kete.Padding{ .padding = .all(10), .child = cx.make(kete.Column{ .fill = false, .spacing = 8, .children = a.dupe(kete.Widget, &.{
+        label(cx, title, 14),
+        cx.make(kete.Row{ .fill = false, .spacing = 8, .children = cells }),
+    }) catch &.{} }) }) });
+}
+
+/// A kind to make or build: its icon, name and cost, and a note; `on`
+/// (queued, or being placed) lighter, `active` (being made) outlined.
+fn kindCell(cx: *kete.BuildContext, k: Kind, on: bool, active: bool, note: []const u8, press: kete.Callback) kete.Widget {
+    const a = cx.arena;
+    const c = k.cost();
+    return cx.make(kete.Pressable{ .on_press = press, .child = cx.make(kete.RoundedBox{
+        .color = gfx.Color.argb(if (on) 0xcc303848 else 0x99000000),
+        .border_width = if (active) 2 else 1,
+        .border_color = gfx.Color.argb(if (active) 0xffffd25a else 0x66ffffff),
+        .radius = .all(8),
+        .child = cx.make(kete.SizedBox{ .width = 104, .child = cx.make(kete.Padding{ .padding = .all(7), .child = cx.make(kete.Column{ .fill = false, .spacing = 2, .cross_axis_alignment = .start, .children = a.dupe(kete.Widget, &.{
+            cx.make(kete.Row{ .fill = false, .spacing = 4, .children = a.dupe(kete.Widget, &.{
+                cx.make(kete.Icon{ .icon = iconOf(k), .size = 18, .color = gfx.Color.argb(0xffffffff) }),
+                label(cx, k.name(), 13),
+            }) catch &.{} }),
+            cx.make(kete.Row{ .fill = false, .spacing = 3, .cross_axis_alignment = .center, .children = a.dupe(kete.Widget, &.{
+                cx.make(kete.Icon{ .icon = .construction, .size = 12, .color = gfx.Color.argb(0xffc8ccd2) }),
+                label(cx, cx.fmt("{d:.0}", .{c.metal}), 12),
+                cx.make(kete.Icon{ .icon = .bolt, .size = 12, .color = gfx.Color.argb(0xffffd25a) }),
+                label(cx, cx.fmt("{d:.0}", .{c.energy}), 12),
+            }) catch &.{} }),
+            label(cx, note, 12),
+        }) catch &.{} }) }) }),
+    }) });
+}
+
 // The icons chosen at run time (`iconOf`, and the window buttons').
 comptime {
-    _ = &[_]kete.IconName{ .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
+    _ = &[_]kete.IconName{ .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
 }
 
 fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {
@@ -136,7 +166,12 @@ fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {
         .walker => .smart_toy,
         .tank => .local_shipping,
         .drone => .flight,
-        else => .construction,
+        .builder => .front_loader,
+        .air_builder => .flight_takeoff,
+        .power => .bolt,
+        .mine => .diamond,
+        .tower => .security,
+        .factory => .factory,
     };
 }
 
@@ -147,6 +182,16 @@ const Queue = struct {
 
     fn add(q: *Queue) void {
         q.game.enqueue(q.kind);
+    }
+};
+
+/// A builders' button: clicked, that building is placed next.
+const Place = struct {
+    game: *Game,
+    kind: Kind,
+
+    fn start(q: *Place) void {
+        q.game.startPlacing(q.kind);
     }
 };
 
@@ -322,9 +367,14 @@ const Battlefield = struct {
                     return true;
                 },
                 .right => {
-                    // A right-click (not a drag): a factory's last queued
-                    // taken out, or what is chosen let go of.
+                    // A right-click (not a drag): placing a building
+                    // stopped, a factory's last queued taken out, or what
+                    // is chosen let go of.
                     if (!g.panUp()) return true;
+                    if (g.placing != null) {
+                        g.placing = null;
+                        return true;
+                    }
                     if (g.chosenFactory()) |f| {
                         if (g.world.things[f].queued > 0) {
                             g.dequeue(g.world.things[f].queue[g.world.things[f].queued - 1]);

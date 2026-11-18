@@ -16,6 +16,12 @@ pub const Kind = enum(u8) {
     tank,
     /// Flying on four rotors: hovers, over water and hills alike.
     drone,
+    /// On six wheels: builds buildings (see `Thing.order`); too wide to
+    /// go between trees.
+    builder,
+    /// A large drone that builds buildings, flying to them over trees and
+    /// water.
+    air_builder,
     /// Guards the base: a gun on a column.
     tower,
     /// Makes units (see `Thing.queue`).
@@ -30,7 +36,12 @@ pub const Kind = enum(u8) {
     }
 
     pub fn flies(k: Kind) bool {
-        return k == .drone;
+        return k == .drone or k == .air_builder;
+    }
+
+    /// Whether it builds buildings.
+    pub fn builds(k: Kind) bool {
+        return k == .builder or k == .air_builder;
     }
 
     pub fn name(k: Kind) []const u8 {
@@ -38,6 +49,8 @@ pub const Kind = enum(u8) {
             .walker => "Walker",
             .tank => "Tank",
             .drone => "Drone",
+            .builder => "Builder",
+            .air_builder => "Air builder",
             .tower => "Tower",
             .factory => "Factory",
             .power => "Power plant",
@@ -51,6 +64,8 @@ pub const Kind = enum(u8) {
             .walker => 3.2,
             .tank => 2.0,
             .drone => 4.5,
+            .builder => 1.8,
+            .air_builder => 3.0,
             else => 0,
         };
     }
@@ -61,6 +76,8 @@ pub const Kind = enum(u8) {
             .walker => 0.45,
             .tank => 0.6,
             .drone => 0.5,
+            .builder => 0.6,
+            .air_builder => 0.65,
             .tower => 0.8,
             .factory => 2.2,
             .power => 1.4,
@@ -74,6 +91,8 @@ pub const Kind = enum(u8) {
             .walker => 1.1,
             .tank => 0.7,
             .drone => 0.5,
+            .builder => 0.8,
+            .air_builder => 0.6,
             .tower => 2.4,
             .factory => 2.2,
             .power => 2.0,
@@ -87,7 +106,12 @@ pub const Kind = enum(u8) {
             .walker => .{ .metal = 40, .energy = 20, .seconds = 4 },
             .tank => .{ .metal = 90, .energy = 40, .seconds = 7 },
             .drone => .{ .metal = 60, .energy = 70, .seconds = 6 },
-            else => .{ .metal = 0, .energy = 0, .seconds = 0 },
+            .builder => .{ .metal = 110, .energy = 60, .seconds = 8 },
+            .air_builder => .{ .metal = 150, .energy = 150, .seconds = 11 },
+            .tower => .{ .metal = 120, .energy = 60, .seconds = 12 },
+            .factory => .{ .metal = 320, .energy = 160, .seconds = 25 },
+            .power => .{ .metal = 70, .energy = 20, .seconds = 8 },
+            .mine => .{ .metal = 60, .energy = 50, .seconds = 10 },
         };
     }
 };
@@ -95,7 +119,16 @@ pub const Kind = enum(u8) {
 pub const Cost = struct { metal: f32, energy: f32, seconds: f32 };
 
 /// What a factory makes.
-pub const buildable = [_]Kind{ .walker, .tank, .drone };
+pub const buildable = [_]Kind{ .walker, .tank, .drone, .builder, .air_builder };
+/// What a builder builds.
+pub const constructible = [_]Kind{ .power, .mine, .tower, .factory };
+
+/// A builder's order: to build a `kind` at `at`, facing `yaw`.
+pub const Order = struct {
+    kind: Kind,
+    at: [2]f32,
+    yaw: f32 = 0,
+};
 
 /// Players' colours (their units' and buildings' marks).
 pub const team_colours = [4]u24{ 0x3b82f6, 0xe64535, 0x38c26a, 0xeab72c };
@@ -126,6 +159,13 @@ pub const Thing = struct {
     progress: f32 = 0,
     /// Where a factory's units go once made.
     rally: [2]f32 = .{ 0, 0 },
+    /// A building's: how far built it is (0 to 1; until 1, it does
+    /// nothing).
+    built: f32 = 1,
+    /// A builder's: what it is to build, and (once it has started) the
+    /// building.
+    order: ?Order = null,
+    site: ?usize = null,
 
     /// Its first in line, if it has one.
     pub fn making(t: *const Thing) ?Kind {
@@ -235,6 +275,12 @@ pub const World = struct {
     /// Sends the units `which` to (x, z): spread out round it, so they do
     /// not all try to stand in one place.
     pub fn moveTo(w: *World, which: []const usize, x: f32, z: f32) void {
+        // Builders sent elsewhere stop building (what they had started
+        // stays, to be gone on with).
+        for (which) |i| {
+            w.things[i].order = null;
+            w.things[i].site = null;
+        }
         var n: usize = 0;
         for (which) |i| {
             if (w.things[i].kind.isBuilding()) continue;
@@ -259,8 +305,13 @@ pub const World = struct {
     pub fn step(w: *World, dt: f32) void {
         w.time += dt;
         for (w.all(), 0..) |*t, i| {
+            if (t.built < 1) continue;
             switch (t.kind) {
                 .walker, .tank, .drone => w.moveUnit(t, i, dt),
+                .builder, .air_builder => {
+                    w.construct(t, dt);
+                    w.moveUnit(t, i, dt);
+                },
                 .tower => w.aimTower(t, dt),
                 .factory => w.make(t, dt),
                 .mine, .power => t.phase += dt * 2,
@@ -291,7 +342,7 @@ pub const World = struct {
         // go; walkers and drones turn as they go.
         const diff = angleDiff(heading, t.yaw);
         const turn_rate: f32 = switch (k) {
-            .tank => 2.2,
+            .tank, .builder => 2.2,
             .walker => 6,
             else => 5,
         };
@@ -314,12 +365,16 @@ pub const World = struct {
             nx += dx / d * push;
             nz += dz / d * push;
         }
-        // Flying, anywhere over the map; on the ground, where it can go.
-        if (if (k.flies()) map_mod.inside(nx, nz) > 0.5 else w.map.passable(nx, nz)) {
+        // Flying, anywhere over the map; on the ground, where it can go:
+        // sliding along what is in the way, if it can; stopping if not.
+        if (w.canBe(k, nx, nz)) {
             t.pos[0] = nx;
             t.pos[2] = nz;
+        } else if (t.moving > 0.05 and w.canBe(k, nx, t.pos[2])) {
+            t.pos[0] = nx;
+        } else if (t.moving > 0.05 and w.canBe(k, t.pos[0], nz)) {
+            t.pos[2] = nz;
         } else {
-            // Blocked (water, a cliff): it stops.
             t.moving = 0;
             t.goal = null;
         }
@@ -328,9 +383,121 @@ pub const World = struct {
         t.pos[1] += (ground - t.pos[1]) * @min(1, (if (k.flies()) @as(f32, 3) else 20) * dt);
         t.phase += dt * switch (k) {
             .walker => t.moving * 3.2,
-            .tank => t.moving * 2,
+            .tank, .builder => t.moving * 2,
             else => 30,
         };
+    }
+
+    /// Whether a `k` can be at (x, z): flying, anywhere over the map; on
+    /// the ground, out of the water, off cliffs (and, a builder, not
+    /// among trees).
+    pub fn canBe(w: *const World, k: Kind, x: f32, z: f32) bool {
+        if (k.flies()) return map_mod.inside(x, z) > 0.5;
+        if (!w.map.passable(x, z)) return false;
+        return k != .builder or !w.map.treeNear(x, z, k.radius());
+    }
+
+    /// Whether a `k` (a building) can be built at (x, z): on the map, on
+    /// level enough dry ground, among no trees, and clear of other
+    /// buildings.
+    pub fn canPlace(w: *const World, k: Kind, x: f32, z: f32) bool {
+        const r = k.radius();
+        if (map_mod.inside(x, z) < r + 1) return false;
+        const h = w.map.heightAt(x, z);
+        for ([_][2]f32{ .{ 0, 0 }, .{ r, 0 }, .{ -r, 0 }, .{ 0, r }, .{ 0, -r } }) |d| {
+            if (!w.map.passable(x + d[0], z + d[1])) return false;
+            if (@abs(w.map.heightAt(x + d[0], z + d[1]) - h) > 0.6) return false;
+        }
+        if (w.map.treeNear(x, z, r)) return false;
+        for (w.things[0..w.count]) |o| {
+            if (!o.kind.isBuilding()) continue;
+            const dx = o.pos[0] - x;
+            const dz = o.pos[2] - z;
+            const apart = o.kind.radius() + r + 0.4;
+            if (dx * dx + dz * dz < apart * apart) return false;
+        }
+        // Nor where another builder means to build.
+        for (w.things[0..w.count]) |o| {
+            const ord = o.order orelse continue;
+            if (o.site != null) continue;
+            const dx = ord.at[0] - x;
+            const dz = ord.at[1] - z;
+            const apart = ord.kind.radius() + r + 0.4;
+            if (dx * dx + dz * dz < apart * apart) return false;
+        }
+        return true;
+    }
+
+    /// Gives builder `i` an order (it goes there, and builds).
+    pub fn orderBuild(w: *World, i: usize, o: Order) void {
+        const t = &w.things[i];
+        if (!t.kind.builds()) return;
+        t.order = o;
+        t.site = null;
+        t.goal = o.at;
+    }
+
+    /// Sends builder `i` to go on building `site` (one of its player's,
+    /// not yet built).
+    pub fn orderResume(w: *World, i: usize, site: usize) void {
+        const t = &w.things[i];
+        const b = w.things[site];
+        if (!t.kind.builds() or b.built >= 1 or b.team != t.team) return;
+        t.order = .{ .kind = b.kind, .at = .{ b.pos[0], b.pos[2] }, .yaw = b.yaw };
+        t.site = site;
+        t.goal = t.order.?.at;
+    }
+
+    /// A builder's work: going to where it is to build; there, starting
+    /// the building (where it was asked, if it still can be), then
+    /// building it, paid for bit by bit as it goes.
+    fn construct(w: *World, t: *Thing, dt: f32) void {
+        const o = t.order orelse return;
+        const dx = o.at[0] - t.pos[0];
+        const dz = o.at[1] - t.pos[2];
+        const reach = o.kind.radius() + t.kind.radius() + 1.0;
+        const there = dx * dx + dz * dz <= reach * reach;
+        if (!there) {
+            // On its way (sent again, if it stopped).
+            if (t.goal == null) t.goal = o.at;
+            return;
+        }
+        t.goal = null;
+        if (t.site) |s| {
+            const b = &w.things[s];
+            if (b.built >= 1) {
+                t.order = null;
+                t.site = null;
+                return;
+            }
+            t.phase += dt * 4;
+            const c = o.kind.cost();
+            const part = dt / c.seconds;
+            const r = &w.resources[t.team];
+            if (r.metal < c.metal * part or r.energy < c.energy * part) return;
+            r.metal -= c.metal * part;
+            r.energy -= c.energy * part;
+            b.built = @min(1, b.built + part);
+            if (b.built >= 1) {
+                t.order = null;
+                t.site = null;
+            }
+            return;
+        }
+        // Started, if it still can be (or given up).
+        t.order = null;
+        if (!w.canPlace(o.kind, o.at[0], o.at[1])) return;
+        t.order = o;
+        const i = w.add(.{ .kind = o.kind, .team = t.team, .pos = .{ o.at[0], 0, o.at[1] }, .yaw = o.yaw, .built = 0 }) orelse {
+            t.order = null;
+            return;
+        };
+        const fwd = [2]f32{ @sin(o.yaw), -@cos(o.yaw) };
+        const out = o.kind.radius() + 4;
+        w.things[i].rally = .{ o.at[0] + fwd[0] * out, o.at[1] + fwd[1] * out };
+        t.site = i;
+        // Facing it.
+        t.yaw = std.math.atan2(dx, -dz);
     }
 
     /// A tower's gun turns to the nearest unit of another player in reach,
@@ -448,4 +615,88 @@ test "a factory makes what is queued, paying as it goes, and sends it out" {
     try testing.expect(w.resources[0].metal < metal + 12.5 * (4 + 1) - 100);
     // On their way to the rally point.
     try testing.expect(w.things[before].goal != null or @abs(w.things[before].pos[0] - w.things[f].rally[0]) < 2);
+}
+
+/// A tree on the map, on open enough ground to drive up to.
+fn someTree(m: *const Map) map_mod.Tree {
+    var r: usize = map_mod.margin_rows + 20;
+    while (r < map_mod.rows - map_mod.margin_rows) : (r += 1) {
+        for (map_mod.margin_cols + 20..map_mod.cols - map_mod.margin_cols) |c| {
+            const t = m.treeAt(c, r) orelse continue;
+            if (map_mod.inside(t.at[0], t.at[2]) > 20 and m.passable(t.at[0], t.at[2])) return t;
+        }
+    }
+    unreachable;
+}
+
+test "a builder: blocked by trees (a tank and an air builder not)" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    const tree = someTree(w.map);
+    try testing.expect(!w.canBe(.builder, tree.at[0], tree.at[2]));
+    try testing.expect(w.canBe(.tank, tree.at[0], tree.at[2]));
+    try testing.expect(w.canBe(.air_builder, tree.at[0], tree.at[2]));
+    // Sent through it, it never gets to it.
+    for ([_]Kind{ .builder, .air_builder }) |k| {
+        w.count = 0;
+        const i = w.add(.{ .kind = k, .team = 0, .pos = .{ tree.at[0] - 6, 0, tree.at[2] } }).?;
+        w.things[i].goal = .{ tree.at[0], tree.at[2] };
+        var nearest: f32 = 100;
+        for (0..60 * 10) |_| {
+            w.step(1.0 / 60.0);
+            const t = w.things[i];
+            nearest = @min(nearest, @abs(t.pos[0] - tree.at[0]) + @abs(t.pos[2] - tree.at[2]));
+        }
+        if (k == .builder) try testing.expect(nearest > 0.5) else try testing.expect(nearest < 0.3);
+    }
+}
+
+test "builders: sent to build, they go there and build it, paying as they go; then it works" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    // (No base: nothing else earns metal.)
+    const b = map_mod.bases[0];
+    const at = [2]f32{ b[0] + 6, b[1] + 6 };
+    for ([_]Kind{ .builder, .air_builder }, 0..) |k, n| {
+        const site = [2]f32{ at[0] + @as(f32, @floatFromInt(n)) * 5, at[1] - @as(f32, @floatFromInt(n)) * 5 };
+        try testing.expect(w.canPlace(.power, site[0], site[1]));
+        const i = w.add(.{ .kind = k, .team = 0, .pos = .{ b[0] + 4, 0, b[1] - 4 } }).?;
+        w.orderBuild(i, .{ .kind = .power, .at = site });
+        // Where it is to go, nothing else is placed.
+        try testing.expect(!w.canPlace(.power, site[0] + 0.5, site[1]));
+        const before = w.resources[0];
+        var site_i: ?usize = null;
+        var t: f32 = 0;
+        while (t < 40) : (t += 1.0 / 30.0) {
+            w.step(1.0 / 30.0);
+            if (w.things[i].site) |s| site_i = s;
+            if (site_i != null and w.things[i].order == null) break;
+        }
+        const s = site_i.?;
+        try testing.expectEqual(Kind.power, w.things[s].kind);
+        try testing.expectEqual(@as(f32, 1), w.things[s].built);
+        try testing.expect(w.things[i].order == null);
+        // It cost what a power plant costs.
+        try testing.expectApproxEqAbs(before.metal - Kind.power.cost().metal, w.resources[0].metal, 0.5);
+    }
+    // Not on a building, nor in the water, nor off the map.
+    _ = w.add(.{ .kind = .factory, .team = 0, .pos = .{ b[0], 0, b[1] } }).?;
+    try testing.expect(!w.canPlace(.tower, b[0] + 1, b[1]));
+    try testing.expect(!w.canPlace(.tower, -10, -10));
+}
+
+test "a building half built: does nothing until it is finished" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    const b = map_mod.bases[0];
+    _ = w.add(.{ .kind = .power, .team = 0, .pos = .{ b[0], 0, b[1] }, .built = 0.5 }).?;
+    const before = w.resources[0].energy;
+    w.step(1);
+    try testing.expectEqual(before, w.resources[0].energy);
 }

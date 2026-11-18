@@ -21,7 +21,7 @@ const glass = rgb(0x8fd8ff);
 const glow = rgb(0xffd25a);
 
 /// The most triangles a thing is (for room in the buffer).
-pub const max_triangles = 160;
+pub const max_triangles = 180;
 
 /// Adds `t`'s triangles to `b`.
 pub fn thing(b: *Builder, t: *const Thing) void {
@@ -32,6 +32,8 @@ pub fn thing(b: *Builder, t: *const Thing) void {
         .walker => walker(b, f, p, t, team),
         .tank => tank(b, f, p, t, team),
         .drone => drone(b, f, p, t, team),
+        .builder => builder(b, f, p, t, team),
+        .air_builder => airBuilder(b, f, p, t, team),
         .tower => tower(b, f, p, t, team),
         .factory => factory(b, f, p, t, team),
         .power => power(b, f, p, t, team),
@@ -66,6 +68,52 @@ fn tank(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
     const top = f.at(p, .{ 0, 0.5, 0.05 });
     b.prism(f, top, 0.26, 0.09, 6, 0.75, team);
     b.box(f, f.at(top, .{ 0, 0.02, -0.45 }), .{ 0.05, 0.05, 0.32 }, .{ 1, 1 }, dark);
+}
+
+fn builder(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    // Six wheels, three a side, turning as it goes: each a five-sided
+    // prism on its side, its cap outwards.
+    for ([2]f32{ -1, 1 }) |side| {
+        const axle: Frame = if (side > 0) .{ .right = -f.up, .up = f.right, .back = f.back } else .{ .right = f.up, .up = -f.right, .back = f.back };
+        const spin = axle.turned(t.phase * side);
+        for ([3]f32{ -0.38, 0, 0.38 }) |along| {
+            b.prism(spin, f.at(p, .{ side * 0.4, 0.15, along }), 0.15, 0.07, 5, 1, black);
+        }
+    }
+    // The body, the cab in front, and its player's colour on top.
+    b.box(f, f.at(p, .{ 0, 0.3, 0.05 }), .{ 0.32, 0.12, 0.52 }, .{ 0.95, 0.95 }, rgb(0xd9a62e));
+    b.box(f, f.at(p, .{ 0, 0.53, -0.3 }), .{ 0.26, 0.11, 0.16 }, .{ 0.85, 0.8 }, metal);
+    b.box(f, f.at(p, .{ 0, 0.53, -0.47 }), .{ 0.2, 0.06, 0.01 }, .{ 1, 1 }, glass);
+    b.box(f, f.at(p, .{ 0, 0.43, 0.3 }), .{ 0.22, 0.02, 0.18 }, .{ 1, 1 }, team);
+    // Its crane, swinging while it builds.
+    const working: f32 = if (t.site != null) 1 else 0;
+    const arm = f.turned(@sin(t.phase * 0.7) * 0.5 * working);
+    const base = f.at(p, .{ 0, 0.5, 0.3 });
+    b.box(arm, arm.at(base, .{ 0, 0.06, 0 }), .{ 0.07, 0.06, 0.07 }, .{ 1, 1 }, dark);
+    const boom = arm.tipped(0.5 + 0.2 * working);
+    b.box(boom, boom.at(base, .{ 0, 0.1, -0.35 }), .{ 0.04, 0.04, 0.35 }, .{ 1, 1 }, glow);
+}
+
+fn airBuilder(b: *Builder, f_in: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    const f = f_in.tipped(-0.15 * @min(1, t.moving / 3));
+    const at = p + V3{ 0, @sin(t.phase * 0.05) * 0.06, 0 };
+    // A long body, its player's colour along its back, a window in front.
+    b.box(f, at, .{ 0.3, 0.13, 0.5 }, .{ 0.8, 0.85 }, rgb(0xd9a62e));
+    b.box(f, f.at(at, .{ 0, 0.14, 0.05 }), .{ 0.12, 0.02, 0.32 }, .{ 1, 1 }, team);
+    b.box(f, f.at(at, .{ 0, 0, -0.51 }), .{ 0.16, 0.06, 0.02 }, .{ 1, 1 }, glass);
+    // Six rotors, on arms out to each side.
+    for ([3]f32{ -0.4, 0, 0.4 }, 0..) |along, i| {
+        b.box(f, f.at(at, .{ 0, 0.05, along }), .{ 0.56, 0.025, 0.025 }, .{ 1, 1 }, dark);
+        for ([2]f32{ -1, 1 }) |side| {
+            const spin = f.turned(t.phase + @as(f32, @floatFromInt(i)) * 1.3 + side);
+            b.box(spin, f.at(at, .{ side * 0.58, 0.1, along }), .{ 0.22, 0.01, 0.03 }, .{ 1, 1 }, metal);
+        }
+    }
+    // Its clamp, hanging below, lowered while it builds.
+    const drop: f32 = if (t.site != null) 0.35 + 0.1 * @sin(t.phase) else 0.1;
+    b.box(f, f.at(at, .{ 0, -0.13 - drop / 2, 0 }), .{ 0.02, drop / 2, 0.02 }, .{ 1, 1 }, dark);
+    b.box(f, f.at(at, .{ 0, -0.17 - drop, 0 }), .{ 0.12, 0.04, 0.08 }, .{ 1, 1 }, glow);
+    shadow(b, .{ p[0], p[1] - 3 + 0.04, p[2] }, 0.6);
 }
 
 fn drone(b: *Builder, f_in: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
