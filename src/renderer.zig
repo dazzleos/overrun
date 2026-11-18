@@ -46,7 +46,7 @@ pub fn Renderer(comptime Device: type) type {
         dev: Device,
         flat: shader.Pipeline,
         ground: vc4.Bo,
-        chunks: [map_mod.chunks * map_mod.chunks]Chunk,
+        chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk,
         /// The units' and buildings' vertices, two buffers in turn (one may
         /// still be being drawn while the next is made).
         dynamic: [2]vc4.Bo,
@@ -64,12 +64,12 @@ pub fn Renderer(comptime Device: type) type {
             });
             errdefer flat.deinit(dev);
             // The ground, chunk by chunk.
-            const per_chunk = map_mod.chunk * map_mod.chunk * 12;
-            const verts = try gpa.alloc(Vertex, per_chunk * map_mod.chunks * map_mod.chunks);
+            const per_chunk = Map.chunk_vertices;
+            const verts = try gpa.alloc(Vertex, per_chunk * map_mod.chunks_x * map_mod.chunks_z);
             defer gpa.free(verts);
-            var chunks: [map_mod.chunks * map_mod.chunks]Chunk = undefined;
+            var chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk = undefined;
             var at: usize = 0;
-            for (0..map_mod.chunks) |cz| for (0..map_mod.chunks) |cx| {
+            for (0..map_mod.chunks_z) |cz| for (0..map_mod.chunks_x) |cx| {
                 const n = m.chunkMesh(cx, cz, verts[at..][0..per_chunk]);
                 var lo: f32 = std.math.inf(f32);
                 var hi: f32 = -std.math.inf(f32);
@@ -77,7 +77,7 @@ pub fn Renderer(comptime Device: type) type {
                     lo = @min(lo, v.pos[1]);
                     hi = @max(hi, v.pos[1]);
                 }
-                chunks[cz * map_mod.chunks + cx] = .{ .first = @intCast(at), .count = @intCast(n), .lo = lo, .hi = hi };
+                chunks[cz * map_mod.chunks_x + cx] = .{ .first = @intCast(at), .count = @intCast(n), .lo = lo, .hi = hi };
                 at += n;
             };
             const ground = try dev.createBo(@intCast(at * @sizeOf(Vertex)));
@@ -112,9 +112,8 @@ pub fn Renderer(comptime Device: type) type {
             r.flat.setUniforms(std.mem.asBytes(&u));
             for (r.chunks, 0..) |c, i| {
                 if (c.count == 0) continue;
-                const cx: f32 = @floatFromInt(i % map_mod.chunks * map_mod.chunk);
-                const cz: f32 = @floatFromInt(i / map_mod.chunks * map_mod.chunk);
-                if (!inView(vp, .{ cx, @min(c.lo, map_mod.water_level), cz }, .{ cx + map_mod.chunk, c.hi, cz + map_mod.chunk })) continue;
+                const bounds = Map.chunkBounds(i % map_mod.chunks_x, i / map_mod.chunks_x);
+                if (!inView(vp, .{ bounds[0][0], @min(c.lo, map_mod.water_level), bounds[0][1] }, .{ bounds[1][0], c.hi, bounds[1][1] })) continue;
                 r.stats.chunks += 1;
                 try r.drawRange(sink, r.ground.handle, c.first, c.count, viewport, scissor);
             }

@@ -1,6 +1,9 @@
-//! The battlefield: a grid of corners each at its own height, each square
-//! between four of them two triangles, so the ground has hills, ridges and
-//! valleys (with water in the lowest); and its triangles to draw, lit and
+//! The battlefield: corners on a hexagonal lattice (rows of them a block
+//! apart, each row half a block along from the one before, the rows
+//! √3/2 apart), each at its own height, and between each three of them a
+//! triangle (equilateral, seen from above: six round each corner, a
+//! hexagon), so the ground has hills, ridges and valleys (with water in
+//! the lowest) and no grid's diagonals; and its triangles to draw, lit and
 //! coloured by height and slope, in chunks (those out of view are not
 //! drawn).
 
@@ -11,14 +14,21 @@ const mesh = @import("mesh.zig");
 const V3 = math.V3;
 const Vertex = mesh.Vertex;
 
-/// Squares across and down (the map is `size` blocks square).
+/// Blocks across and down (the map is `size` blocks square).
 pub const size = 96;
+/// How far apart the rows of corners are.
+pub const row_gap: f32 = 0.8660254;
+/// Corners in a row (the last of the odd rows half a block past the
+/// map), and rows (enough to reach `size` down).
+pub const cols = size + 1;
+pub const rows = 112 + 1;
 /// The water's height: ground below it is under water (units on the
 /// ground cannot go there).
 pub const water_level: f32 = 0.6;
-/// Squares across a chunk (drawn, or not, together).
+/// Corners across and rows down a chunk (drawn, or not, together).
 pub const chunk = 16;
-pub const chunks = size / chunk;
+pub const chunks_x = size / chunk;
+pub const chunks_z = (rows - 1) / chunk;
 
 /// Where each player's base is (the corners of the map, in from them).
 pub const bases = [4][2]f32{ .{ 16, 16 }, .{ size - 16, size - 16 }, .{ size - 16, 16 }, .{ 16, size - 16 } };
@@ -26,46 +36,81 @@ pub const bases = [4][2]f32{ .{ 16, 16 }, .{ size - 16, size - 16 }, .{ size - 1
 const base_radius: f32 = 9;
 
 pub const Map = struct {
-    /// Each corner's height, (size + 1) by (size + 1).
-    heights: [(size + 1) * (size + 1)]f32,
+    /// Each corner's height, row by row.
+    heights: [rows * cols]f32,
+
+    /// Where corner (c, r) is, across and down.
+    pub fn at(c: usize, r: usize) [2]f32 {
+        return .{ @as(f32, @floatFromInt(c)) + (if (r % 2 == 1) @as(f32, 0.5) else 0), @as(f32, @floatFromInt(r)) * row_gap };
+    }
 
     pub fn generate(m: *Map, seed: u32) void {
-        for (0..size + 1) |z| for (0..size + 1) |x| {
-            const fx: f32 = @floatFromInt(x);
-            const fz: f32 = @floatFromInt(z);
+        for (0..rows) |r| for (0..cols) |c| {
+            const p = at(c, r);
+            const fx = p[0];
+            const fz = p[1];
             var h = 3.2 * fbm(seed, fx / 22, fz / 22, 4) - 0.6;
             // Ridges here and there.
-            const r = 1 - @abs(noise(seed +% 7, fx / 14, fz / 14) * 2 - 1);
-            h += 2.2 * r * r * fbm(seed +% 11, fx / 30, fz / 30, 2);
+            const rr = 1 - @abs(noise(seed +% 7, fx / 14, fz / 14) * 2 - 1);
+            h += 2.2 * rr * rr * fbm(seed +% 11, fx / 30, fz / 30, 2);
             // Level ground round each base.
             for (bases) |b| {
                 const d = @sqrt((fx - b[0]) * (fx - b[0]) + (fz - b[1]) * (fz - b[1]));
                 const k = smoothstep(base_radius + 6, base_radius, d);
                 h = h * (1 - k) + 1.5 * k;
             }
-            m.heights[z * (size + 1) + x] = h;
+            m.heights[r * cols + c] = h;
         };
     }
 
-    pub fn corner(m: *const Map, x: usize, z: usize) f32 {
-        return m.heights[@as(usize, @min(z, size)) * (size + 1) + @as(usize, @min(x, size))];
+    pub fn corner(m: *const Map, c: usize, r: usize) f32 {
+        return m.heights[@as(usize, @min(r, rows - 1)) * cols + @as(usize, @min(c, cols - 1))];
+    }
+
+    fn point(m: *const Map, c: usize, r: usize) V3 {
+        const p = at(c, r);
+        return .{ p[0], m.corner(c, r), p[1] };
+    }
+
+    /// The two triangles between rows `r` and `r + 1` at column `c`: the
+    /// one pointing down from row `r`, and the one pointing up from row
+    /// `r + 1`, as corners (column, row).
+    fn trianglesAt(c: usize, r: usize) [2][3][2]usize {
+        // Even rows: the next row is half a block on; odd rows, half back.
+        return if (r % 2 == 0)
+            .{ .{ .{ c, r }, .{ c + 1, r }, .{ c, r + 1 } }, .{ .{ c + 1, r }, .{ c, r + 1 }, .{ c + 1, r + 1 } } }
+        else
+            .{ .{ .{ c, r }, .{ c + 1, r }, .{ c + 1, r + 1 } }, .{ .{ c, r }, .{ c, r + 1 }, .{ c + 1, r + 1 } } };
     }
 
     /// The ground's height at (x, z), on its triangle.
     pub fn heightAt(m: *const Map, x: f32, z: f32) f32 {
-        const cx = std.math.clamp(x, 0, size - 0.001);
-        const cz = std.math.clamp(z, 0, size - 0.001);
-        const ix: usize = @intFromFloat(@floor(cx));
-        const iz: usize = @intFromFloat(@floor(cz));
-        const fx = cx - @as(f32, @floatFromInt(ix));
-        const fz = cz - @as(f32, @floatFromInt(iz));
-        const h00 = m.corner(ix, iz);
-        const h10 = m.corner(ix + 1, iz);
-        const h01 = m.corner(ix, iz + 1);
-        const h11 = m.corner(ix + 1, iz + 1);
-        // Split from (0, 0) to (1, 1): the triangle below the diagonal, or
-        // above it.
-        return if (fx >= fz) h00 + (h10 - h00) * fx + (h11 - h10) * fz else h00 + (h01 - h00) * fz + (h11 - h01) * fx;
+        const r: usize = @intFromFloat(std.math.clamp(@floor(z / row_gap), 0, rows - 2));
+        // The columns the point may be between (each row is offset).
+        const c0: usize = @intFromFloat(std.math.clamp(@floor(x - 0.5), 0, cols - 2));
+        var best: f32 = 0;
+        var best_out: f32 = std.math.inf(f32);
+        var c = c0;
+        while (c <= @min(c0 + 1, cols - 2)) : (c += 1) {
+            for (trianglesAt(c, r)) |t| {
+                const a = m.point(t[0][0], t[0][1]);
+                const b = m.point(t[1][0], t[1][1]);
+                const d = m.point(t[2][0], t[2][1]);
+                // Barycentric weights, across and down.
+                const den = (b[2] - d[2]) * (a[0] - d[0]) + (d[0] - b[0]) * (a[2] - d[2]);
+                const wa = ((b[2] - d[2]) * (x - d[0]) + (d[0] - b[0]) * (z - d[2])) / den;
+                const wb = ((d[2] - a[2]) * (x - d[0]) + (a[0] - d[0]) * (z - d[2])) / den;
+                const wc = 1 - wa - wb;
+                // Inside it, or (at the map's edges) the nearest.
+                const out = @max(0, -wa) + @max(0, -wb) + @max(0, -wc);
+                if (out < best_out) {
+                    best_out = out;
+                    best = wa * a[1] + wb * b[1] + wc * d[1];
+                }
+                if (out == 0) return best;
+            }
+        }
+        return best;
     }
 
     /// The ground's height, or the water's over it.
@@ -113,26 +158,28 @@ pub const Map = struct {
         return null;
     }
 
+    /// The most vertices a chunk is (its triangles, and water over each).
+    pub const chunk_vertices = chunk * chunk * 2 * 3 * 2;
+
+    /// Where chunk (cx, cz) is, across and down: from, and to.
+    pub fn chunkBounds(cx: usize, cz: usize) [2][2]f32 {
+        return .{ .{ @floatFromInt(cx * chunk), @as(f32, @floatFromInt(cz * chunk)) * row_gap }, .{ @as(f32, @floatFromInt((cx + 1) * chunk)) + 0.5, @as(f32, @floatFromInt((cz + 1) * chunk)) * row_gap } };
+    }
+
     /// The triangles of chunk (cx, cz), and its water, into `out`;
     /// returns how many vertices.
     pub fn chunkMesh(m: *const Map, cx: usize, cz: usize, out: []Vertex) usize {
         var b: mesh.Builder = .{ .out = out };
-        for (cz * chunk..(cz + 1) * chunk) |z| for (cx * chunk..(cx + 1) * chunk) |x| {
-            const p = [4]V3{
-                m.point(x, z),
-                m.point(x + 1, z),
-                m.point(x + 1, z + 1),
-                m.point(x, z + 1),
-            };
-            // The square's two triangles, from (0, 0) to (1, 1), each
-            // facing up (counter-clockwise from above).
-            for ([2][3]usize{ .{ 0, 2, 1 }, .{ 0, 3, 2 } }) |t| {
-                const q = [3]V3{ p[t[0]], p[t[1]], p[t[2]] };
+        for (cz * chunk..(cz + 1) * chunk) |r| for (cx * chunk..(cx + 1) * chunk) |c| {
+            for (trianglesAt(c, r)) |t| {
+                var q = [3]V3{ m.point(t[0][0], t[0][1]), m.point(t[1][0], t[1][1]), m.point(t[2][0], t[2][1]) };
+                // Facing up (counter-clockwise from above).
+                if (math.cross(q[1] - q[0], q[2] - q[0])[1] < 0) std.mem.swap(V3, &q[1], &q[2]);
                 const n = math.cross(q[1] - q[0], q[2] - q[0]);
                 const lowest = @min(q[0][1], @min(q[1][1], q[2][1]));
                 const mid = (q[0][1] + q[1][1] + q[2][1]) / 3;
                 const steep = 1 - math.normalize(n)[1];
-                b.triangle(q, groundColour(mid, steep, @intCast(x * 31 + z * 17)));
+                b.triangle(q, groundColour(mid, steep, @intCast(c * 31 + r * 17)));
                 // Water over what is under it.
                 if (lowest < water_level) {
                     const w = [3]V3{ .{ q[0][0], water_level, q[0][2] }, .{ q[1][0], water_level, q[1][2] }, .{ q[2][0], water_level, q[2][2] } };
@@ -142,10 +189,6 @@ pub const Map = struct {
             }
         };
         return b.n;
-    }
-
-    fn point(m: *const Map, x: usize, z: usize) V3 {
-        return .{ @floatFromInt(x), m.corner(x, z), @floatFromInt(z) };
     }
 };
 
@@ -222,18 +265,39 @@ test "the ground: level round the bases, its height on its triangles, rays meeti
         try testing.expectApproxEqAbs(@as(f32, 1.5), m.heightAt(b[0], b[1]), 0.01);
         try testing.expect(m.passable(b[0], b[1]));
     }
-    // At a corner, the corner's height.
-    try testing.expectEqual(m.corner(10, 20), m.heightAt(10, 20));
+    // At a corner (on an even row, and an odd), the corner's height.
+    for ([_][2]usize{ .{ 10, 20 }, .{ 33, 41 } }) |cr| {
+        const p = Map.at(cr[0], cr[1]);
+        try testing.expectApproxEqAbs(m.corner(cr[0], cr[1]), m.heightAt(p[0], p[1]), 1e-4);
+    }
     // A ray straight down onto a base meets it there.
     const hit = m.raycast(.{ bases[0][0], 30, bases[0][1] }, .{ 0, -1, 0 }).?;
     try testing.expectApproxEqAbs(@as(f32, 1.5), hit[1], 0.05);
-    // A chunk's triangles face up.
-    var verts: [chunk * chunk * 12]Vertex = undefined;
-    const n = m.chunkMesh(0, 0, &verts);
+}
+
+test "the triangles: equilateral from above, facing up, six round each corner" {
+    const m = try testing.allocator.create(Map);
+    defer testing.allocator.destroy(m);
+    m.generate(1);
+    var verts: [Map.chunk_vertices]Vertex = undefined;
+    const n = m.chunkMesh(1, 1, &verts);
     try testing.expect(n >= chunk * chunk * 6);
+    var round: usize = 0;
+    const centre = Map.at(24, 24);
     var i: usize = 0;
     while (i < n) : (i += 3) {
         const p: [3]V3 = .{ verts[i].pos, verts[i + 1].pos, verts[i + 2].pos };
         try testing.expect(math.cross(p[1] - p[0], p[2] - p[0])[1] > 0);
+        // Water is over the ground's triangle: only the ground's counted.
+        if (verts[i].pos[1] == water_level and verts[i + 1].pos[1] == water_level) continue;
+        for (0..3) |k| {
+            const a = p[k];
+            const b = p[(k + 1) % 3];
+            try testing.expectApproxEqAbs(@as(f32, 1), @sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[2] - b[2]) * (a[2] - b[2])), 1e-4);
+        }
+        for (p) |q| if (@abs(q[0] - centre[0]) < 1e-4 and @abs(q[2] - centre[1]) < 1e-4) {
+            round += 1;
+        };
     }
+    try testing.expectEqual(@as(usize, 6), round);
 }
