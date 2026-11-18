@@ -10,6 +10,7 @@ const vc4 = @import("vc4");
 const game_mod = @import("game.zig");
 const units = @import("units.zig");
 const minimap = @import("minimap.zig");
+const sky = @import("sky.zig");
 const font = kete.font;
 
 const Game = game_mod.Game;
@@ -57,7 +58,18 @@ fn label(cx: *kete.BuildContext, text: []const u8, size: f32) kete.Widget {
     return cx.make(kete.Text{ .text = text, .style = .{ .size = size, .color = gfx.Color.argb(0xffffffff) }, .wrap = false });
 }
 
-/// This player's metal and energy, top left.
+/// The weather, and whether it is day or night, as an icon.
+fn weatherIcon(g: *const Game) @FieldType(kete.Icon, "icon") {
+    const t = g.world.time;
+    return switch (sky.kindAt(g.map.seed, t)) {
+        .clear => if (sky.isNight(t)) .nights_stay else .wb_sunny,
+        .cloudy => .cloud,
+        .rain => .water_drop,
+        .storm => .thunderstorm,
+    };
+}
+
+/// This player's metal and energy, and the weather, top left.
 fn resources(cx: *kete.BuildContext, g: *Game) kete.Widget {
     const r = g.world.resources[game_mod.me];
     return cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(10), .child = cx.make(kete.Padding{ .padding = .{ .left = 12, .top = 6, .right = 12, .bottom = 6 }, .child = cx.make(kete.Row{
@@ -69,6 +81,7 @@ fn resources(cx: *kete.BuildContext, g: *Game) kete.Widget {
             label(cx, cx.fmt("{d:.0}", .{r.metal}), 18),
             cx.make(kete.Icon{ .icon = .bolt, .size = 20, .color = gfx.Color.argb(0xffffd25a) }),
             label(cx, cx.fmt("{d:.0}", .{r.energy}), 18),
+            cx.make(kete.Icon{ .icon = weatherIcon(g), .size = 20, .color = gfx.Color.argb(if (sky.isNight(g.world.time)) 0xff9fb4ff else 0xffe8eef6) }),
         }) catch &.{},
     }) }) });
 }
@@ -113,7 +126,7 @@ fn chosenPanel(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
 
 // The icons chosen at run time (`iconOf`, and the window buttons').
 comptime {
-    _ = &[_]kete.IconName{ .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
+    _ = &[_]kete.IconName{ .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
 }
 
 fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {

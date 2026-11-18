@@ -42,9 +42,10 @@ pub const Minimap = struct {
             const dz = (heights[i + width + 2] - heights[i - width - 2]) * scale / 2;
             const n = math.V3{ -dx, 1, -dz };
             const steep = 1 - math.normalize(n)[1];
-            var c = if (h < map_mod.water_level) map_mod.waterColour(h) else mesh.lit(map_mod.colourOf(h, steep, @intCast(x * 31 + y * 17)), n);
+            const rocky = map_mod.rockyOf(seed, p[0], p[1]);
+            var c = if (h < map_mod.water_level) map_mod.waterColour(h) else mesh.lit(map_mod.colourOf(h, steep, rocky, @intCast(x * 31 + y * 17)), n);
             // Forests, darker.
-            if (map_mod.treeHeight(h)) {
+            if (map_mod.treeHeight(h) and rocky <= 0.3) {
                 const k = map_mod.forestOf(seed, p[0], p[1]) * 0.75;
                 const tree = mesh.rgb(0x24502a);
                 c = .{ c[0] + (tree[0] - c[0]) * k, c[1] + (tree[1] - c[1]) * k, c[2] + (tree[2] - c[2]) * k };

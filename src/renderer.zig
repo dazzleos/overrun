@@ -27,6 +27,15 @@ const max_per_draw = 3 * 20000;
 
 const Uniforms = extern struct {
     mvp: math.Mat4,
+    tint: [4]f32,
+};
+
+/// How a frame is seen: `vp` (world to clip space), what of the ground can
+/// be in view (from `Camera.groundBox`), and the light (see sky.zig).
+pub const Look = struct {
+    vp: math.Mat4,
+    ground: [2][2]f32,
+    tint: mesh.Rgb = .{ 1, 1, 1 },
 };
 
 pub const Stats = struct {
@@ -121,11 +130,12 @@ pub fn Renderer(comptime Device: type) type {
         }
 
         /// Draws the ground in view, and `dynamic` vertices of the buffer
-        /// `dynamicVertices` gave, with `vp` (world to clip space); `ground`
-        /// is what of the ground can be in view (from `Camera.groundBox`).
-        pub fn draw(r: *Self, sink: anytype, viewport: vc4.render.Viewport, scissor: ?vc4.render.Viewport, vp: math.Mat4, ground: [2][2]f32, dynamic: usize) !void {
+        /// `dynamicVertices` gave, as `look` says.
+        pub fn draw(r: *Self, sink: anytype, viewport: vc4.render.Viewport, scissor: ?vc4.render.Viewport, look: Look, dynamic: usize) !void {
+            const vp = look.vp;
+            const ground = look.ground;
             r.stats = .{};
-            const u: Uniforms = .{ .mvp = vp };
+            const u: Uniforms = .{ .mvp = vp, .tint = .{ look.tint[0], look.tint[1], look.tint[2], 1 } };
             r.flat.setUniforms(std.mem.asBytes(&u));
             // Those well out of view let go of.
             const keep = chunksIn(ground, keep_past);

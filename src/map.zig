@@ -82,8 +82,30 @@ const outside_light: f32 = 0.42;
 const base_radius: f32 = 9;
 
 /// The lowest and highest the ground can be (see `heightOf`).
-pub const lowest: f32 = -0.6;
-pub const highest: f32 = 4.8;
+pub const lowest: f32 = -0.6 - rocky_bumps;
+pub const highest: f32 = 4.8 + highland_rise + rocky_bumps;
+
+/// How much higher the highlands go, and how rough rocky ground is.
+const highland_rise: f32 = 5;
+const rocky_bumps: f32 = 0.8;
+
+/// How far from the bases (0 near them, 1 from `from` on).
+fn awayFromBases(x: f32, z: f32, near: f32, from: f32) f32 {
+    var d: f32 = std.math.inf(f32);
+    for (bases) |b| d = @min(d, @sqrt((x - b[0]) * (x - b[0]) + (z - b[1]) * (z - b[1])));
+    return smoothstep(near, from, d);
+}
+
+/// How much of the highlands (taller ground) (x, z) is in, from 0 to 1:
+/// large patches, away from the bases.
+pub fn highlandOf(seed: u32, x: f32, z: f32) f32 {
+    return smoothstep(0.55, 0.7, fbm(seed +% 31, x / 70, z / 70, 3)) * awayFromBases(x, z, 28, 48);
+}
+
+/// How rocky (x, z) is, from 0 to 1: rough, bare patches.
+pub fn rockyOf(seed: u32, x: f32, z: f32) f32 {
+    return smoothstep(0.58, 0.68, fbm(seed +% 43, x / 24, z / 24, 2)) * awayFromBases(x, z, 18, 30);
+}
 
 /// The ground's height at (x, z), made from the map's seed: noise, ridges
 /// here and there, and level round each base.
@@ -92,6 +114,15 @@ pub fn heightOf(seed: u32, x: f32, z: f32) f32 {
     var h = 3.2 * fbm(seed, x / 22, z / 22, 4) - 0.6;
     const rr = 1 - @abs(noise(seed +% 7, x / 14, z / 14) * 2 - 1);
     h += 2.2 * rr * rr * fbm(seed +% 11, x / 30, z / 30, 2);
+    // The highlands: hills and ridges, higher.
+    const high = highlandOf(seed, x, z);
+    if (high > 0) {
+        const ridge = 1 - @abs(noise(seed +% 37, x / 12, z / 12) * 2 - 1);
+        h += high * highland_rise * (0.7 * fbm(seed +% 41, x / 16, z / 16, 3) + 0.3 * ridge * ridge);
+    }
+    // Rocky ground: rough.
+    const rocky = rockyOf(seed, x, z);
+    if (rocky > 0) h += rocky * rocky_bumps * (noise(seed +% 47, x / 1.8, z / 1.8) * 2 - 1);
     for (bases) |b| {
         const d = @sqrt((x - b[0]) * (x - b[0]) + (z - b[1]) * (z - b[1]));
         const k = smoothstep(base_radius + 6, base_radius, d);
@@ -100,10 +131,10 @@ pub fn heightOf(seed: u32, x: f32, z: f32) f32 {
     return h;
 }
 
-/// The ground's colour at a height, and how steep it is there (from 0,
-/// level).
-pub fn colourOf(h: f32, steep: f32, salt: u32) mesh.Rgb {
-    return groundColour(h, steep, salt);
+/// The ground's colour at a height, how steep it is there (from 0,
+/// level), and how rocky.
+pub fn colourOf(h: f32, steep: f32, rocky: f32, salt: u32) mesh.Rgb {
+    return groundColour(h, steep, rocky, salt);
 }
 
 /// How thick the forest is at (x, z), from 0 (none) to 1: patches of it
@@ -115,7 +146,7 @@ pub fn forestOf(seed: u32, x: f32, z: f32) f32 {
 /// Whether a tree can grow at height `h`: not by the water (on the sand)
 /// or up on the rock.
 pub fn treeHeight(h: f32) bool {
-    return h > water_level + 0.45 and h < 3.4;
+    return h > water_level + 0.45 and h < 5.5;
 }
 
 /// The tallest a tree is.
@@ -262,7 +293,7 @@ pub const Map = struct {
     pub fn raycast(m: *const Map, origin: V3, dir: V3) ?V3 {
         // From where it comes down to the highest the ground can be.
         if (dir[1] >= 0) return null;
-        var t = @max(0, (12 - origin[1]) / dir[1]);
+        var t = @max(0, (highest + 1 - origin[1]) / dir[1]);
         var last = origin + dir * math.splat(t);
         const step: f32 = 0.2;
         var i: u32 = 0;
@@ -295,6 +326,7 @@ pub const Map = struct {
         const x = p[0] + 0.2 + 0.6 * hash(salt);
         const z = p[1] + (0.15 + 0.7 * hash(salt +% 1)) * row_gap;
         if (hash(salt +% 2) >= forestOf(m.seed, x, z) * 0.85) return null;
+        if (rockyOf(m.seed, x, z) > 0.3) return null;
         for (bases) |b| if ((x - b[0]) * (x - b[0]) + (z - b[1]) * (z - b[1]) < (base_radius + 4) * (base_radius + 4)) return null;
         const h = m.heightAt(x, z);
         if (!treeHeight(h)) return null;
@@ -347,7 +379,8 @@ pub const Map = struct {
                 const bottom = @min(q[0][1], @min(q[1][1], q[2][1]));
                 const mid = (q[0][1] + q[1][1] + q[2][1]) / 3;
                 const steep = 1 - math.normalize(n)[1];
-                const ground = groundColour(mid, steep, @intCast(c * 31 + r * 17));
+                const rocky = rockyOf(m.seed, (q[0][0] + q[1][0] + q[2][0]) / 3, (q[0][2] + q[1][2] + q[2][2]) / 3);
+                const ground = groundColour(mid, steep, rocky, @intCast(c * 31 + r * 17));
                 b.shaded(q, dim(mesh.lit(ground, n), light));
                 // Water over what is under it.
                 if (bottom < water_level) {
@@ -361,15 +394,18 @@ pub const Map = struct {
     }
 };
 
-/// The ground's colour: sand by the water, grass, then rock up high and
-/// on steep slopes; each triangle a little different (so they show).
-fn groundColour(h: f32, steep: f32, salt: u32) mesh.Rgb {
+/// The ground's colour: sand by the water, grass, then rock up high, on
+/// steep slopes and on rocky ground; each triangle a little different (so
+/// they show).
+fn groundColour(h: f32, steep: f32, rocky: f32, salt: u32) mesh.Rgb {
     const sand = mesh.rgb(0xc8b27a);
     const grass = mesh.rgb(0x5f8a3e);
     const dry = mesh.rgb(0x8a8a4a);
     const rock = mesh.rgb(0x7d7468);
+    const dark_rock = mesh.rgb(0x5e5850);
     var c = if (h < water_level + 0.35) sand else mixRgb(grass, dry, smoothstep(1.8, 3.4, h));
-    c = mixRgb(c, rock, @max(smoothstep(0.18, 0.4, steep), smoothstep(3.6, 4.6, h)));
+    const bare = mixRgb(rock, dark_rock, hash(salt +% 9) * smoothstep(0.3, 0.8, rocky));
+    c = mixRgb(c, bare, @max(@max(smoothstep(0.18, 0.4, steep), smoothstep(6.5, 8, h)), smoothstep(0.2, 0.55, rocky)));
     const k = 0.94 + 0.1 * hash(salt);
     return .{ c[0] * k, c[1] * k, c[2] * k };
 }

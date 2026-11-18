@@ -18,6 +18,7 @@ const models = @import("models.zig");
 const game_mod = @import("game.zig");
 const renderer_mod = @import("renderer.zig");
 const view = @import("view.zig");
+const sky = @import("sky.zig");
 
 const print = sys.print;
 const Renderer = renderer_mod.Renderer(vc4.Device);
@@ -67,7 +68,15 @@ const Scene = struct {
             const age = g.world.time - sent.time;
             if (age < 0.8) models.ring(&b, sent.at + V3{ 0, 0.06, 0 }, 0.3 + age, mesh.rgb(0xffd25a));
         }
-        try s.renderer.draw(renderer_mod.FrameSink{ .frame = f }, vp, scissor, m, g.camera.groundBox(aspect, map_mod.lowest, map_mod.highest + map_mod.tallest_tree), b.n);
+        // The weather: rain, and the light.
+        const time = g.world.time;
+        const weather = sky.weatherAt(g.map.seed, time);
+        sky.rain(&b, g.camera, aspect, 2 * g.camera.zoom / @as(f32, @floatFromInt(@max(vp.height, 1))), time, weather.rain);
+        try s.renderer.draw(renderer_mod.FrameSink{ .frame = f }, vp, scissor, .{
+            .vp = m,
+            .ground = g.camera.groundBox(aspect, map_mod.lowest, map_mod.highest + map_mod.tallest_tree),
+            .tint = sky.tintAt(g.map.seed, time, weather),
+        }, b.n);
     }
 };
 
@@ -170,6 +179,7 @@ test {
     _ = @import("mesh.zig");
     _ = @import("map.zig");
     _ = @import("minimap.zig");
+    _ = @import("sky.zig");
     _ = @import("units.zig");
     _ = @import("models.zig");
     _ = @import("renderer.zig");
