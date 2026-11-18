@@ -1,0 +1,21 @@
+.{
+    .name = .overrun,
+    .version = "0.0.0",
+    .fingerprint = 0x23ae05650133f2a, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        // Dazzle's modules (kete_vc4 and the rest) and tools, which Overrun
+        // is built with. To build with a Dazzle checkout beside it instead:
+        // `zig build --fork=../dazzle`.
+        .dazzle = .{
+            .url = "git+https://github.com/dazzleos/dazzle#280e2d260d6501f4cfe5ccc1025be677e6a30979",
+            .hash = "dazzle-0.0.0-ze61IKSO2wCfoi9F6v10IpcC9KCNZA58x1adOh-LVGIf",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+    },
+}

@@ -1,0 +1,177 @@
+//! How each kind of unit and building looks: boxes and prisms, in its
+//! player's colour where it is marked, its moving parts (legs, rotors,
+//! drills, guns) placed as they are now. Made anew each frame, all into
+//! one buffer (one draw for them all).
+
+const std = @import("std");
+const math = @import("math.zig");
+const mesh = @import("mesh.zig");
+const units = @import("units.zig");
+
+const V3 = math.V3;
+const Frame = mesh.Frame;
+const Builder = mesh.Builder;
+const Thing = units.Thing;
+const rgb = mesh.rgb;
+
+const metal = rgb(0x9aa3ad);
+const dark = rgb(0x4a5058);
+const black = rgb(0x24272b);
+const glass = rgb(0x8fd8ff);
+const glow = rgb(0xffd25a);
+
+/// The most triangles a thing is (for room in the buffer).
+pub const max_triangles = 160;
+
+/// Adds `t`'s triangles to `b`.
+pub fn thing(b: *Builder, t: *const Thing) void {
+    const team = rgb(units.team_colours[t.team]);
+    const f = Frame.of(t.yaw, 0, 0);
+    const p = t.pos;
+    switch (t.kind) {
+        .walker => walker(b, f, p, t, team),
+        .tank => tank(b, f, p, t, team),
+        .drone => drone(b, f, p, t, team),
+        .tower => tower(b, f, p, t, team),
+        .factory => factory(b, f, p, t, team),
+        .power => power(b, f, p, t, team),
+        .mine => mine(b, f, p, t, team),
+    }
+}
+
+fn walker(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    // Legs, swinging as it walks, and its body bobbing with them.
+    const swing = @sin(t.phase) * @min(1, t.moving) * 0.6;
+    const bob = @abs(@sin(t.phase)) * 0.05 * @min(1, t.moving);
+    for ([2]f32{ -1, 1 }) |side| {
+        const leg = f.tipped(swing * side);
+        const hip = f.at(p, .{ side * 0.16, 0.55, 0 });
+        b.box(leg, leg.at(hip, .{ 0, -0.27, 0 }), .{ 0.08, 0.27, 0.1 }, .{ 1, 1 }, dark);
+        b.box(leg, leg.at(hip, .{ 0, -0.52, -0.05 }), .{ 0.1, 0.03, 0.16 }, .{ 1, 1 }, black);
+    }
+    const body = f.at(p, .{ 0, 0.72 + bob, 0 });
+    b.box(f, body, .{ 0.24, 0.18, 0.16 }, .{ 0.85, 0.85 }, metal);
+    b.box(f, f.at(body, .{ 0, 0.06, 0.17 }), .{ 0.16, 0.1, 0.03 }, .{ 1, 1 }, team);
+    // Its head, eye forward, and a gun on its arm.
+    b.box(f, f.at(body, .{ 0, 0.27, -0.02 }), .{ 0.12, 0.09, 0.11 }, .{ 0.9, 0.9 }, team);
+    b.box(f, f.at(body, .{ 0, 0.28, -0.13 }), .{ 0.08, 0.025, 0.02 }, .{ 1, 1 }, glass);
+    b.box(f, f.at(body, .{ 0.3, 0, -0.12 }), .{ 0.05, 0.05, 0.22 }, .{ 1, 1 }, dark);
+}
+
+fn tank(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    _ = t;
+    for ([2]f32{ -1, 1 }) |side| b.box(f, f.at(p, .{ side * 0.42, 0.16, 0 }), .{ 0.14, 0.16, 0.55 }, .{ 1, 0.9 }, black);
+    b.box(f, f.at(p, .{ 0, 0.3, 0 }), .{ 0.32, 0.12, 0.5 }, .{ 0.85, 0.85 }, metal);
+    // The turret and its gun (facing as the tank does).
+    const top = f.at(p, .{ 0, 0.5, 0.05 });
+    b.prism(f, top, 0.26, 0.09, 6, 0.75, team);
+    b.box(f, f.at(top, .{ 0, 0.02, -0.45 }), .{ 0.05, 0.05, 0.32 }, .{ 1, 1 }, dark);
+}
+
+fn drone(b: *Builder, f_in: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    // Leaning into where it is going; hovering up and down a little.
+    const f = f_in.tipped(-0.25 * @min(1, t.moving / 3));
+    const at = p + V3{ 0, @sin(t.phase * 0.08) * 0.08, 0 };
+    b.box(f, at, .{ 0.2, 0.1, 0.28 }, .{ 0.8, 0.8 }, team);
+    b.box(f, f.at(at, .{ 0, -0.02, -0.29 }), .{ 0.1, 0.05, 0.02 }, .{ 1, 1 }, glass);
+    // Four arms, a rotor spinning at each end.
+    for ([4][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ -1, 1 }, .{ 1, 1 } }, 0..) |c, i| {
+        const arm = f.turned(std.math.atan2(c[0], c[1]));
+        b.box(arm, arm.at(at, .{ 0, 0.04, 0.25 }), .{ 0.03, 0.03, 0.22 }, .{ 1, 1 }, dark);
+        const hub = f.at(at, .{ c[0] * 0.33, 0.1, c[1] * 0.33 });
+        const spin = f.turned(t.phase + @as(f32, @floatFromInt(i)));
+        b.box(spin, hub, .{ 0.2, 0.01, 0.03 }, .{ 1, 1 }, metal);
+    }
+    // Its shadow, on what is under it.
+    shadow(b, .{ p[0], p[1] - 3 + 0.04, p[2] }, 0.45);
+}
+
+fn tower(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    b.prism(f, f.at(p, .{ 0, 0.25, 0 }), 0.75, 0.25, 8, 0.85, dark);
+    b.prism(f, f.at(p, .{ 0, 1.0, 0 }), 0.35, 0.55, 6, 0.85, metal);
+    b.prism(f, f.at(p, .{ 0, 1.6, 0 }), 0.2, 0.06, 6, 1, team);
+    // The gun, turned to aim.
+    const gun = Frame.of(t.aim, 0, 0);
+    const head = gun.at(p, .{ 0, 1.85, 0 });
+    b.box(gun, head, .{ 0.3, 0.2, 0.35 }, .{ 0.85, 0.8 }, metal);
+    for ([2]f32{ -1, 1 }) |side| b.box(gun, gun.at(head, .{ side * 0.12, 0, -0.6 }), .{ 0.05, 0.05, 0.3 }, .{ 1, 1 }, dark);
+}
+
+fn factory(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    b.box(f, f.at(p, .{ 0, 0.8, 0 }), .{ 1.8, 0.8, 1.8 }, .{ 0.95, 0.95 }, metal);
+    // Its door, in front, glowing while it makes something.
+    const lit: f32 = if (t.queued > 0) 0.6 + 0.4 * @abs(@sin(t.phase * 3)) else 0;
+    b.box(f, f.at(p, .{ 0, 0.55, -1.8 }), .{ 0.9, 0.55, 0.06 }, .{ 1, 1 }, mixRgb(black, glow, lit));
+    // Roof stripes in its player's colour, and a crane.
+    b.box(f, f.at(p, .{ 0, 1.62, 0.6 }), .{ 1.5, 0.04, 0.3 }, .{ 1, 1 }, team);
+    b.box(f, f.at(p, .{ 0, 1.62, -0.4 }), .{ 1.5, 0.04, 0.3 }, .{ 1, 1 }, team);
+    const crane = f.turned(@sin(t.phase * 0.5) * 0.8);
+    const mast = f.at(p, .{ 1.2, 1.6, 1.2 });
+    b.box(f, f.at(mast, .{ 0, 0.4, 0 }), .{ 0.1, 0.4, 0.1 }, .{ 1, 1 }, dark);
+    b.box(crane, crane.at(mast, .{ 0, 0.85, -0.6 }), .{ 0.07, 0.06, 0.8 }, .{ 1, 1 }, glow);
+}
+
+fn power(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    b.box(f, f.at(p, .{ 0, 0.3, 0 }), .{ 1.2, 0.3, 1.2 }, .{ 0.9, 0.9 }, dark);
+    // A cooling tower, and a core pulsing with what it makes.
+    b.prism(f, f.at(p, .{ -0.4, 1.1, 0.2 }), 0.65, 0.5, 8, 0.7, metal);
+    const pulse = 0.5 + 0.5 * @sin(t.phase * 2);
+    b.prism(f, f.at(p, .{ 0.6, 0.9, -0.5 }), 0.3, 0.3, 6, 0.6, mixRgb(team, glow, pulse));
+    b.box(f, f.at(p, .{ 0, 0.62, 1.15 }), .{ 0.8, 0.04, 0.06 }, .{ 1, 1 }, team);
+}
+
+fn mine(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    b.box(f, f.at(p, .{ 0, 0.25, 0 }), .{ 1.2, 0.25, 1.2 }, .{ 0.9, 0.9 }, dark);
+    // A frame over the shaft, and the drill turning in it.
+    for ([4][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ -1, 1 }, .{ 1, 1 } }) |c| {
+        b.box(f, f.at(p, .{ c[0] * 0.7, 1.4, c[1] * 0.7 }), .{ 0.07, 0.95, 0.07 }, .{ 1, 1 }, metal);
+    }
+    b.box(f, f.at(p, .{ 0, 2.4, 0 }), .{ 0.8, 0.08, 0.8 }, .{ 1, 1 }, team);
+    const drill = f.turned(t.phase * 3);
+    b.prism(drill, f.at(p, .{ 0, 1.3, 0 }), 0.25, 0.8, 4, 0.4, glow);
+}
+
+/// A dark patch on the ground under something.
+fn shadow(b: *Builder, at: V3, r: f32) void {
+    const c = rgb(0x1e2418);
+    const sides = 8;
+    for (0..sides) |k| {
+        const a0 = @as(f32, @floatFromInt(k)) / sides * 2 * std.math.pi;
+        const a1 = @as(f32, @floatFromInt(k + 1)) / sides * 2 * std.math.pi;
+        b.shaded(.{ at, at + V3{ @cos(a1) * r, 0, @sin(a1) * r }, at + V3{ @cos(a0) * r, 0, @sin(a0) * r } }, c);
+    }
+}
+
+/// A ring on the ground round something chosen, `r` round, at height `y`.
+pub fn ring(b: *Builder, at: V3, r: f32, c: mesh.Rgb) void {
+    const sides = 12;
+    const w: f32 = 0.08;
+    for (0..sides) |k| {
+        const a0 = @as(f32, @floatFromInt(k)) / sides * 2 * std.math.pi;
+        const a1 = @as(f32, @floatFromInt(k + 1)) / sides * 2 * std.math.pi;
+        const in0 = at + V3{ @cos(a0) * r, 0, @sin(a0) * r };
+        const in1 = at + V3{ @cos(a1) * r, 0, @sin(a1) * r };
+        const out0 = at + V3{ @cos(a0) * (r + w), 0, @sin(a0) * (r + w) };
+        const out1 = at + V3{ @cos(a1) * (r + w), 0, @sin(a1) * (r + w) };
+        b.shaded(.{ in0, in1, out1 }, c);
+        b.shaded(.{ in0, out1, out0 }, c);
+    }
+}
+
+fn mixRgb(a: mesh.Rgb, b2: mesh.Rgb, t: f32) mesh.Rgb {
+    return .{ a[0] + (b2[0] - a[0]) * t, a[1] + (b2[1] - a[1]) * t, a[2] + (b2[2] - a[2]) * t };
+}
+
+const testing = std.testing;
+
+test "every kind: within its room, facing out" {
+    var verts: [max_triangles * 3]mesh.Vertex = undefined;
+    for (std.enums.values(units.Kind)) |k| {
+        var b: Builder = .{ .out = &verts };
+        const t: Thing = .{ .kind = k, .team = 1, .pos = .{ 5, 3 + (if (k.flies()) @as(f32, 3) else 0), 5 }, .yaw = 0.5, .moving = 1, .phase = 1.3 };
+        thing(&b, &t);
+        try testing.expect(b.n > 0);
+        // Not cut short: room to spare.
+        try testing.expect(b.n < verts.len);
+    }
+}
