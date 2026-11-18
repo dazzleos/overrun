@@ -20,6 +20,7 @@ const renderer_mod = @import("renderer.zig");
 const view = @import("view.zig");
 const units = @import("units.zig");
 const sky = @import("sky.zig");
+const combat = @import("combat.zig");
 
 const print = sys.print;
 const Renderer = renderer_mod.Renderer(vc4.Device);
@@ -83,6 +84,29 @@ const Scene = struct {
                 models.ring(&b, .{ t.pos[0], ground + 0.06, t.pos[2] }, t.kind.radius() + 0.2, mesh.rgb(0x5ef08a));
             }
         }
+        // The fighting: health bars over what is damaged (and seen),
+        // tracers and shells in flight, and bursts.
+        const per_pixel = 2 * g.camera.zoom / @as(f32, @floatFromInt(@max(vp.height, 1)));
+        const fwd = g.camera.forward();
+        for (g.world.things[0..g.world.count]) |t| {
+            const most = combat.maxHealth(t.kind);
+            if (t.health >= most or !g.canSee(t)) continue;
+            const over = t.pos + V3{ 0, t.kind.height() + 0.35, 0 };
+            models.healthBar(&b, over, std.math.clamp(t.health / most, 0, 1), @max(0.8, t.kind.radius() * 1.6), g.camera.right(), g.camera.up());
+        }
+        for (g.world.shots[0..g.world.shot_count]) |shot| {
+            const head = shot.head();
+            const way = shot.to - shot.from;
+            const len = math.length(way);
+            const tail_len = @min(if (shot.shell) @as(f32, 0.9) else 2.4, len * shot.at);
+            const tail = head - way * math.splat(tail_len / @max(len, 0.01));
+            if (shot.shell) {
+                models.streak(&b, tail, head, per_pixel * 4, fwd, .{ 2.4, 1.9, 1.2 });
+            } else {
+                models.streak(&b, tail, head, per_pixel * 2, fwd, .{ 2.0, 1.7, 0.8 });
+            }
+        }
+        for (g.world.blasts[0..g.world.blast_count]) |bl| models.blast(&b, bl.at, bl.size, bl.age, combat.blast_seconds);
         // The building being placed, under the pointer: green where it can
         // go, red where not.
         if (g.ghost()) |gh| {
@@ -210,6 +234,7 @@ test {
     _ = @import("sky.zig");
     _ = @import("fog.zig");
     _ = @import("nav.zig");
+    _ = @import("combat.zig");
     _ = @import("units.zig");
     _ = @import("models.zig");
     _ = @import("renderer.zig");

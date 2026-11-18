@@ -61,13 +61,14 @@ fn walker(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
 }
 
 fn tank(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
-    _ = t;
     for ([2]f32{ -1, 1 }) |side| b.box(f, f.at(p, .{ side * 0.42, 0.16, 0 }), .{ 0.14, 0.16, 0.55 }, .{ 1, 0.9 }, black);
     b.box(f, f.at(p, .{ 0, 0.3, 0 }), .{ 0.32, 0.12, 0.5 }, .{ 0.85, 0.85 }, metal);
-    // The turret and its gun (facing as the tank does).
+    // The turret, turned to aim: its big gun, and a machine gun on top.
+    const turret = Frame.of(t.aim, 0, 0).scaled(t.kind.scale());
     const top = f.at(p, .{ 0, 0.5, 0.05 });
-    b.prism(f, top, 0.26, 0.09, 6, 0.75, team);
-    b.box(f, f.at(top, .{ 0, 0.02, -0.45 }), .{ 0.05, 0.05, 0.32 }, .{ 1, 1 }, dark);
+    b.prism(turret, top, 0.26, 0.09, 6, 0.75, team);
+    b.box(turret, turret.at(top, .{ 0, 0.02, -0.45 }), .{ 0.05, 0.05, 0.32 }, .{ 1, 1 }, dark);
+    b.box(turret, turret.at(top, .{ 0.11, 0.12, -0.12 }), .{ 0.025, 0.025, 0.12 }, .{ 1, 1 }, black);
 }
 
 fn builder(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
@@ -204,6 +205,51 @@ pub fn ring(b: *Builder, at: V3, r: f32, c: mesh.Rgb) void {
         b.shaded(.{ in0, in1, out1 }, c);
         b.shaded(.{ in0, out1, out0 }, c);
     }
+}
+
+/// A streak from `tail` to `head`, `width` across, facing the camera
+/// (looking along `forward`), glowing (brighter than lit things, so it
+/// shows at night).
+pub fn streak(b: *Builder, tail: V3, head: V3, width: f32, forward: V3, c: mesh.Rgb) void {
+    const along = head - tail;
+    const side = math.normalize(math.cross(along, forward)) * math.splat(width / 2);
+    var q = [4]V3{ tail - side, tail + side, head + side * math.splat(0.6), head - side * math.splat(0.6) };
+    // Facing the camera (counter-clockwise seen from it).
+    if (math.dot(math.cross(q[1] - q[0], q[2] - q[0]), forward) > 0) std.mem.swap(V3, &q[1], &q[3]);
+    b.shaded(.{ q[0], q[1], q[2] }, c);
+    b.shaded(.{ q[0], q[2], q[3] }, c);
+}
+
+/// A burst, `age` of `life` seconds old, `size` across: a fireball
+/// swelling, white to orange, then dark smoke rising.
+pub fn blast(b: *Builder, at: V3, size: f32, age: f32, life: f32) void {
+    const k = age / life;
+    const r = size * (0.35 + 0.65 * @sqrt(k));
+    const hot = mixRgb(.{ 2.4, 2.2, 1.6 }, .{ 1.8, 0.7, 0.15 }, @min(1, k * 2.2));
+    const c = mixRgb(hot, .{ 0.22, 0.2, 0.19 }, smooth(0.45, 1, k));
+    const f = Frame.of(age * 2 + size, 0, 0);
+    const mid = at + V3{ 0, r * 0.4 + k * size * 0.6, 0 };
+    b.prism(f, mid, r, r * 0.5, 6, 0.45, c);
+    // Its underside (seen from above, the lower half's sides).
+    b.prism(f.tipped(std.math.pi), mid, r, r * 0.35, 6, 0.6, mixRgb(c, .{ 0.1, 0.1, 0.1 }, 0.3));
+}
+
+/// A bar over a damaged thing: how much it has left, green to red.
+pub fn healthBar(b: *Builder, over: V3, left: f32, width: f32, right: V3, up: V3) void {
+    const h: f32 = 0.09;
+    const r = right * math.splat(width / 2);
+    const u = up * math.splat(h / 2);
+    const start = over - r;
+    const split = start + r * math.splat(2 * left);
+    b.shaded(.{ start - u, split - u, split + u }, .{ 1.6 - 1.4 * left, 0.25 + 1.2 * left, 0.2 });
+    b.shaded(.{ start - u, split + u, start + u }, .{ 1.6 - 1.4 * left, 0.25 + 1.2 * left, 0.2 });
+    b.shaded(.{ split - u, over + r - u, over + r + u }, .{ 0.12, 0.12, 0.12 });
+    b.shaded(.{ split - u, over + r + u, split + u }, .{ 0.12, 0.12, 0.12 });
+}
+
+fn smooth(lo: f32, hi: f32, x: f32) f32 {
+    const t = std.math.clamp((x - lo) / (hi - lo), 0, 1);
+    return t * t * (3 - 2 * t);
 }
 
 fn mixRgb(a: mesh.Rgb, b2: mesh.Rgb, t: f32) mesh.Rgb {

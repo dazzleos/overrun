@@ -164,6 +164,16 @@ pub const Game = struct {
     pub fn tick(g: *Game, dt: f32) void {
         if (g.menu_open) return;
         g.world.step(dt);
+        // Those chosen that were destroyed, let go of; the rest, where
+        // they now are.
+        if (g.world.removed_any) {
+            var n: usize = 0;
+            for (g.chosen.items) |i| if (g.world.moved_to[i]) |to| {
+                g.chosen.items[n] = to;
+                n += 1;
+            };
+            g.chosen.shrinkRetainingCapacity(n);
+        }
         g.fog_age += dt;
         if (g.fog_age >= fog_mod.every) {
             g.fog.update(g.world, me);
@@ -713,6 +723,26 @@ test "placing a building: a builder chosen, a building picked, the ground clicke
     g.click(spot.?);
     try testing.expect(g.placing == null);
     try testing.expectEqual(units.Kind.power, g.world.things[i].order.?.kind);
+}
+
+test "what is chosen and destroyed is let go of; the rest still chosen" {
+    var g = try testGame();
+    defer g.deinit();
+    g.closeMenu();
+    var walkers: [2]usize = undefined;
+    var n: usize = 0;
+    for (g.world.all(), 0..) |t, i| if (t.team == me and t.kind == .walker and n < 2) {
+        walkers[n] = i;
+        n += 1;
+    };
+    const tank = for (g.world.all(), 0..) |t, i| {
+        if (t.team == me and t.kind == .tank) break i;
+    } else unreachable;
+    g.chosen.appendSlice(testing.allocator, &.{ walkers[0], tank }) catch {};
+    g.world.things[walkers[0]].health = 0;
+    g.tick(0.01);
+    try testing.expectEqual(@as(usize, 1), g.chosen.items.len);
+    try testing.expectEqual(units.Kind.tank, g.world.things[g.chosen.items[0]].kind);
 }
 
 test "a double click on a unit chooses all of its kind on the screen" {

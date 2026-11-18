@@ -6,6 +6,7 @@ const std = @import("std");
 const math = @import("math.zig");
 const map_mod = @import("map.zig");
 const nav = @import("nav.zig");
+const combat = @import("combat.zig");
 
 const V3 = math.V3;
 const Map = map_mod.Map;
@@ -184,6 +185,15 @@ pub const Thing = struct {
     path_next: u8 = 0,
     /// How many times it has looked for a way again (stuck), since sent.
     replans: u8 = 0,
+    /// How much more it can take (set to its most when added).
+    health: f32 = 0,
+    /// Its weapons' (see combat.zig): what each is aimed at, how long
+    /// until each can fire again, and how long until it looks again for
+    /// what to shoot; a tower's barrel to fire next.
+    targets: [2]?u16 = .{ null, null },
+    cool: [2]f32 = .{ 0, 0 },
+    look: f32 = 0,
+    barrel: bool = false,
     /// How fast it is going now (it speeds up and slows down).
     moving: f32 = 0,
     /// Its legs', rotors' or drill's turn, for drawing them.
@@ -242,11 +252,22 @@ pub const World = struct {
     resources: [4]Resources = @splat(.{}),
     /// The game's time, in seconds.
     time: f32 = 0,
+    /// Shots in flight, and bursts (see combat.zig).
+    shots: [combat.max_shots]combat.Shot = undefined,
+    shot_count: usize = 0,
+    blasts: [combat.max_blasts]combat.Blast = undefined,
+    blast_count: usize = 0,
+    /// Where each thing went when the destroyed were taken out (null:
+    /// destroyed), if any were this step.
+    moved_to: [max_things]?u16 = undefined,
+    removed_any: bool = false,
 
     pub fn add(w: *World, t: Thing) ?usize {
         if (w.count == max_things) return null;
         var with = t;
         with.pos[1] = w.groundFor(t.kind, t.pos[0], t.pos[2]);
+        if (with.health <= 0) with.health = combat.maxHealth(t.kind);
+        with.aim = t.yaw;
         if (t.kind.isBuilding()) w.map.nav.building(t.pos[0], t.pos[2], t.kind.radius(), true);
         w.things[w.count] = with;
         w.count += 1;
@@ -412,13 +433,65 @@ pub const World = struct {
                     w.construct(t, dt);
                     w.moveUnit(t, i, dt);
                 },
-                .tower => w.aimTower(t, dt),
+                .tower => {},
                 .factory => w.make(t, dt),
                 .mine, .power => t.phase += dt * 2,
             }
             const inc = income(t.kind);
             w.resources[t.team].metal += inc.metal * dt;
             w.resources[t.team].energy += inc.energy * dt;
+        }
+        combat.step(w, dt);
+        w.removeDestroyed();
+    }
+
+    pub fn addShot(w: *World, s: combat.Shot) void {
+        if (w.shot_count == combat.max_shots) return;
+        w.shots[w.shot_count] = s;
+        w.shot_count += 1;
+    }
+
+    pub fn addBlast(w: *World, b: combat.Blast) void {
+        if (w.blast_count == combat.max_blasts) return;
+        w.blasts[w.blast_count] = b;
+        w.blast_count += 1;
+    }
+
+    /// Takes out what has been destroyed (each bursting), keeping the rest
+    /// in order; where each went is in `moved_to`.
+    fn removeDestroyed(w: *World) void {
+        w.removed_any = false;
+        for (w.things[0..w.count]) |t| {
+            if (t.health <= 0) break;
+        } else return;
+        var n: usize = 0;
+        for (0..w.count) |i| {
+            const t = w.things[i];
+            if (t.health <= 0) {
+                w.moved_to[i] = null;
+                w.addBlast(.{ .at = t.pos + V3{ 0, t.kind.height() * 0.4, 0 }, .size = switch (combat.armourOf(t.kind)) {
+                    .light => 0.8,
+                    .vehicle => 1.5,
+                    .building => 2.6,
+                } });
+                if (t.kind.isBuilding()) w.map.nav.building(t.pos[0], t.pos[2], t.kind.radius(), false);
+                continue;
+            }
+            w.moved_to[i] = @intCast(n);
+            w.things[n] = t;
+            n += 1;
+        }
+        w.count = n;
+        w.removed_any = true;
+        for (w.things[0..w.count]) |*t| {
+            for (&t.targets) |*target| target.* = if (target.*) |j| w.moved_to[j] else null;
+            if (t.site) |s| {
+                if (w.moved_to[s]) |ns| t.site = ns else {
+                    // What it was building is gone.
+                    t.site = null;
+                    t.order = null;
+                }
+            }
         }
     }
 
@@ -621,25 +694,6 @@ pub const World = struct {
         t.site = i;
         // Facing it.
         t.yaw = std.math.atan2(dx, -dz);
-    }
-
-    /// A tower's gun turns to the nearest unit of another player in reach,
-    /// or slowly round, looking.
-    fn aimTower(w: *World, t: *Thing, dt: f32) void {
-        var best: ?V3 = null;
-        var best_d: f32 = 14 * 14;
-        for (w.things[0..w.count]) |o| {
-            if (o.team == t.team or o.kind.isBuilding()) continue;
-            const d = o.pos - t.pos;
-            const d2 = d[0] * d[0] + d[2] * d[2];
-            if (d2 < best_d) {
-                best_d = d2;
-                best = o.pos;
-            }
-        }
-        const want = if (best) |p| std.math.atan2(p[0] - t.pos[0], -(p[2] - t.pos[2])) else t.aim + 0.4;
-        const diff = angleDiff(want, t.aim);
-        t.aim = wrap(t.aim + std.math.clamp(diff, -2 * dt, 2 * dt));
     }
 
     /// A factory makes its first in line, if its player can pay for it as
