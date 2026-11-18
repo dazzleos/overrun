@@ -12,7 +12,7 @@ const Map = map_mod.Map;
 pub const Kind = enum(u8) {
     /// On two legs: quick and cheap.
     walker,
-    /// On tracks: slow, tough.
+    /// On tracks: slow, tough; too big to go between trees.
     tank,
     /// Flying on four rotors: hovers, over water and hills alike.
     drone,
@@ -37,6 +37,21 @@ pub const Kind = enum(u8) {
 
     pub fn flies(k: Kind) bool {
         return k == .drone or k == .air_builder;
+    }
+
+    /// Whether trees are in its way (those on tracks and wheels are too
+    /// big to go between them; walkers and fliers are not).
+    pub fn blockedByTrees(k: Kind) bool {
+        return k == .tank or k == .builder;
+    }
+
+    /// How much bigger than its model is drawn (see models.zig).
+    pub fn scale(k: Kind) f32 {
+        return switch (k) {
+            .tank, .builder => 1.4,
+            .air_builder => 1.3,
+            else => 1,
+        };
     }
 
     /// Whether it builds buildings.
@@ -82,10 +97,10 @@ pub const Kind = enum(u8) {
     pub fn radius(k: Kind) f32 {
         return switch (k) {
             .walker => 0.45,
-            .tank => 0.6,
+            .tank => 0.84,
             .drone => 0.5,
-            .builder => 0.6,
-            .air_builder => 0.65,
+            .builder => 0.84,
+            .air_builder => 0.85,
             .tower => 0.8,
             .factory => 2.2,
             .power => 1.4,
@@ -97,10 +112,10 @@ pub const Kind = enum(u8) {
     pub fn height(k: Kind) f32 {
         return switch (k) {
             .walker => 1.1,
-            .tank => 0.7,
+            .tank => 1.0,
             .drone => 0.5,
-            .builder => 0.8,
-            .air_builder => 0.6,
+            .builder => 1.1,
+            .air_builder => 0.8,
             .tower => 2.4,
             .factory => 2.2,
             .power => 2.0,
@@ -296,7 +311,12 @@ pub const World = struct {
         }
         if (n == 0) return;
         const across: usize = @intFromFloat(@ceil(@sqrt(@as(f32, @floatFromInt(n)))));
-        const gap: f32 = 1.4;
+        // Far enough apart for the biggest of them.
+        var widest: f32 = 0;
+        for (which) |i| if (!w.things[i].kind.isBuilding()) {
+            widest = @max(widest, w.things[i].kind.radius());
+        };
+        const gap: f32 = @max(1.4, 2 * widest + 0.3);
         var k: usize = 0;
         for (which) |i| {
             const t = &w.things[i];
@@ -397,12 +417,12 @@ pub const World = struct {
     }
 
     /// Whether a `k` can be at (x, z): flying, anywhere over the map; on
-    /// the ground, out of the water, off cliffs (and, a builder, not
-    /// among trees).
+    /// the ground, out of the water, off cliffs (and, too big to go
+    /// between trees, not among them).
     pub fn canBe(w: *const World, k: Kind, x: f32, z: f32) bool {
         if (k.flies()) return map_mod.inside(x, z) > 0.5;
         if (!w.map.passable(x, z)) return false;
-        return k != .builder or !w.map.treeNear(x, z, k.radius());
+        return !k.blockedByTrees() or !w.map.treeNear(x, z, k.radius());
     }
 
     /// Whether a `k` (a building) can be built at (x, z): on the map, on
@@ -637,17 +657,16 @@ fn someTree(m: *const Map) map_mod.Tree {
     unreachable;
 }
 
-test "a builder: blocked by trees (a tank and an air builder not)" {
+test "trees: in the way of tanks and builders, not of walkers and fliers" {
     const tw = try testWorld();
     defer tw.map.destroy(testing.allocator);
     defer testing.allocator.destroy(tw.world);
     const w = tw.world;
     const tree = someTree(w.map);
-    try testing.expect(!w.canBe(.builder, tree.at[0], tree.at[2]));
-    try testing.expect(w.canBe(.tank, tree.at[0], tree.at[2]));
-    try testing.expect(w.canBe(.air_builder, tree.at[0], tree.at[2]));
-    // Sent through it, it never gets to it.
-    for ([_]Kind{ .builder, .air_builder }) |k| {
+    for ([_]Kind{ .tank, .builder }) |k| try testing.expect(!w.canBe(k, tree.at[0], tree.at[2]));
+    for ([_]Kind{ .walker, .drone, .air_builder }) |k| try testing.expect(w.canBe(k, tree.at[0], tree.at[2]));
+    // Sent through it: those it is in the way of never get to it.
+    for ([_]Kind{ .tank, .builder, .walker, .air_builder }) |k| {
         w.count = 0;
         const i = w.add(.{ .kind = k, .team = 0, .pos = .{ tree.at[0] - 6, 0, tree.at[2] } }).?;
         w.things[i].goal = .{ tree.at[0], tree.at[2] };
@@ -657,7 +676,7 @@ test "a builder: blocked by trees (a tank and an air builder not)" {
             const t = w.things[i];
             nearest = @min(nearest, @abs(t.pos[0] - tree.at[0]) + @abs(t.pos[2] - tree.at[2]));
         }
-        if (k == .builder) try testing.expect(nearest > 0.5) else try testing.expect(nearest < 0.3);
+        if (k.blockedByTrees()) try testing.expect(nearest > 0.5) else try testing.expect(nearest < 0.3);
     }
 }
 

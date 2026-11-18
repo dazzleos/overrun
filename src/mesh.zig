@@ -40,6 +40,11 @@ pub const Frame = struct {
     up: V3,
     back: V3,
 
+    /// The same, `s` times as big (all drawn with it is).
+    pub fn scaled(f: Frame, s: f32) Frame {
+        return .{ .right = f.right * math.splat(s), .up = f.up * math.splat(s), .back = f.back * math.splat(s) };
+    }
+
     pub fn of(yaw: f32, pitch: f32, roll: f32) Frame {
         const cy = @cos(yaw);
         const sy = @sin(yaw);

@@ -26,7 +26,7 @@ pub const max_triangles = 180;
 /// Adds `t`'s triangles to `b`.
 pub fn thing(b: *Builder, t: *const Thing) void {
     const team = rgb(units.team_colours[t.team]);
-    const f = Frame.of(t.yaw, 0, 0);
+    const f = Frame.of(t.yaw, 0, 0).scaled(t.kind.scale());
     const p = t.pos;
     switch (t.kind) {
         .walker => walker(b, f, p, t, team),
@@ -113,7 +113,7 @@ fn airBuilder(b: *Builder, f_in: Frame, p: V3, t: *const Thing, team: mesh.Rgb) 
     const drop: f32 = if (t.site != null) 0.35 + 0.1 * @sin(t.phase) else 0.1;
     b.box(f, f.at(at, .{ 0, -0.13 - drop / 2, 0 }), .{ 0.02, drop / 2, 0.02 }, .{ 1, 1 }, dark);
     b.box(f, f.at(at, .{ 0, -0.17 - drop, 0 }), .{ 0.12, 0.04, 0.08 }, .{ 1, 1 }, glow);
-    shadow(b, .{ p[0], p[1] - 3 + 0.04, p[2] }, 0.6);
+    shadow(b, .{ p[0], p[1] - 3 + 0.04, p[2] }, 0.6 * t.kind.scale());
 }
 
 fn drone(b: *Builder, f_in: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
