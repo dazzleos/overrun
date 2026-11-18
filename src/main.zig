@@ -89,6 +89,7 @@ const Scene = struct {
         const per_pixel = 2 * g.camera.zoom / @as(f32, @floatFromInt(@max(vp.height, 1)));
         const fwd = g.camera.forward();
         for (g.world.things[0..g.world.count]) |t| {
+            if (!t.powered and t.team == game_mod.me) models.unpowered(&b, t.pos + V3{ 0, t.kind.height() + 0.7, 0 }, g.world.time);
             const most = combat.maxHealth(t.kind);
             if (t.health >= most or !g.canSee(t)) continue;
             const over = t.pos + V3{ 0, t.kind.height() + 0.35, 0 };

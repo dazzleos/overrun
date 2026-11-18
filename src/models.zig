@@ -39,6 +39,7 @@ pub fn thing(b: *Builder, t: *const Thing) void {
         .flak => flak(b, f, p, t, team),
         .missile => missile(b, p, t),
         .silo => silo(b, f, p, t, team),
+        .battery => battery(b, f, p, t, team),
         .tower => tower(b, f, p, t, team),
         .factory => factory(b, f, p, t, team),
         .power => power(b, f, p, t, team),
@@ -192,6 +193,18 @@ fn silo(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
     b.box(f, f.at(p, .{ 1.25, 0.66, 1.25 }), .{ 0.1, 0.06, 0.1 }, .{ 1, 1 }, mixRgb(black, .{ 2.2, 0.6, 0.3 }, lit));
 }
 
+/// A battery: a block of cells, its player's colour on top, and a light
+/// showing (as the game is drawn) that it is charging.
+fn battery(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    b.box(f, f.at(p, .{ 0, 0.1, 0 }), .{ 0.95, 0.1, 0.95 }, .{ 1, 1 }, dark);
+    for ([2]f32{ -1, 1 }) |x| for ([2]f32{ -1, 1 }) |z| {
+        b.prism(f, f.at(p, .{ x * 0.45, 0.7, z * 0.45 }), 0.3, 0.5, 6, 1, rgb(0x6b7a86));
+    };
+    b.box(f, f.at(p, .{ 0, 1.24, 0 }), .{ 0.7, 0.04, 0.7 }, .{ 1, 1 }, team);
+    const lit = 0.6 + 0.4 * @abs(@sin(t.phase * 1.5));
+    b.box(f, f.at(p, .{ 0, 1.3, 0 }), .{ 0.12, 0.04, 0.12 }, .{ 1, 1 }, .{ 0.4 * lit, 2.0 * lit, 0.8 * lit });
+}
+
 fn flak(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
     for ([2]f32{ -1, 1 }) |side| b.box(f, f.at(p, .{ side * 0.42, 0.16, 0 }), .{ 0.14, 0.16, 0.55 }, .{ 1, 0.9 }, black);
     b.box(f, f.at(p, .{ 0, 0.3, 0 }), .{ 0.32, 0.12, 0.5 }, .{ 0.85, 0.85 }, metal);
@@ -320,6 +333,13 @@ pub fn blast(b: *Builder, at: V3, size: f32, age: f32, life: f32) void {
     b.prism(f, mid, r, r * 0.5, 6, 0.45, c);
     // Its underside (seen from above, the lower half's sides).
     b.prism(f.tipped(std.math.pi), mid, r, r * 0.35, 6, 0.6, mixRgb(c, .{ 0.1, 0.1, 0.1 }, 0.3));
+}
+
+/// A light over a building shut down for want of energy: red, blinking.
+pub fn unpowered(b: *Builder, over: V3, time: f32) void {
+    if (@mod(time, 1.0) > 0.6) return;
+    const f = Frame.of(time * 2, 0, 0);
+    b.prism(f, over, 0.22, 0.06, 4, 1, .{ 2.2, 0.35, 0.25 });
 }
 
 /// A bar over a damaged thing: how much it has left, green to red.

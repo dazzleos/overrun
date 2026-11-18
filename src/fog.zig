@@ -39,6 +39,7 @@ pub fn sight(k: units.Kind) f32 {
         .factory => 9,
         .power, .mine => 7,
         .silo => 7,
+        .battery => 6,
         .missile => 3,
     };
 }

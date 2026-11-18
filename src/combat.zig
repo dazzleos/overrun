@@ -43,6 +43,7 @@ pub fn maxHealth(k: Kind) f32 {
         .factory => 1200,
         .power, .mine => 350,
         .silo => 900,
+        .battery => 300,
         // Hard to shoot down: tough, and hard to hit (see `fire`).
         .missile => 250,
     };
@@ -192,6 +193,8 @@ pub fn step(w: *World, dt: f32) void {
         if (t.built < 1) continue;
         const weapons = weaponsOf(t.kind);
         if (weapons[0] == null and weapons[1] == null) continue;
+        // A tower shut down (short of energy) does not fire.
+        if (!t.powered) continue;
         t.look -= dt;
         if (t.look <= 0) {
             t.look = look_every + @as(f32, @floatFromInt(i % 7)) * 0.01;

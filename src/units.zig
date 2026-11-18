@@ -47,6 +47,8 @@ pub const Kind = enum(u8) {
     mine,
     /// Builds a missile (one at a time), and launches it anywhere.
     silo,
+    /// Stores energy (see `battery_storage`).
+    battery,
 
     pub fn isBuilding(k: Kind) bool {
         return @intFromEnum(k) >= @intFromEnum(Kind.tower);
@@ -117,6 +119,7 @@ pub const Kind = enum(u8) {
             .mine => "Mine",
             .missile => "Missile",
             .silo => "Missile silo",
+            .battery => "Battery",
         };
     }
 
@@ -160,6 +163,7 @@ pub const Kind = enum(u8) {
             .mine => 1.4,
             .missile => 0.4,
             .silo => 1.7,
+            .battery => 1.0,
         };
     }
 
@@ -180,32 +184,54 @@ pub const Kind = enum(u8) {
             .mine => 2.6,
             .missile => 0.5,
             .silo => 1.0,
+            .battery => 1.4,
         };
     }
 
     /// What making one costs, and how long it takes (seconds).
     pub fn cost(k: Kind) Cost {
         return switch (k) {
-            .walker => .{ .metal = 40, .energy = 20, .seconds = 4 },
-            .tank => .{ .metal = 90, .energy = 40, .seconds = 7 },
-            .drone => .{ .metal = 60, .energy = 70, .seconds = 6 },
-            .builder => .{ .metal = 110, .energy = 60, .seconds = 8 },
-            .air_builder => .{ .metal = 150, .energy = 150, .seconds = 11 },
-            .bomber => .{ .metal = 180, .energy = 160, .seconds = 12 },
-            .fighter => .{ .metal = 110, .energy = 120, .seconds = 8 },
-            .flak => .{ .metal = 120, .energy = 60, .seconds = 8 },
-            .tower => .{ .metal = 120, .energy = 60, .seconds = 12 },
-            .factory => .{ .metal = 320, .energy = 160, .seconds = 25 },
-            .power => .{ .metal = 70, .energy = 20, .seconds = 8 },
-            .mine => .{ .metal = 60, .energy = 50, .seconds = 10 },
-            .silo => .{ .metal = 400, .energy = 250, .seconds = 30 },
-            // Built in a silo: metal alone.
-            .missile => .{ .metal = 300, .energy = 0, .seconds = 40 },
+            .walker => .{ .metal = 40, .seconds = 4 },
+            .tank => .{ .metal = 90, .seconds = 7 },
+            .drone => .{ .metal = 60, .seconds = 6 },
+            .builder => .{ .metal = 110, .seconds = 8 },
+            .air_builder => .{ .metal = 150, .seconds = 11 },
+            .bomber => .{ .metal = 180, .seconds = 12 },
+            .fighter => .{ .metal = 110, .seconds = 8 },
+            .flak => .{ .metal = 120, .seconds = 8 },
+            .tower => .{ .metal = 120, .seconds = 12 },
+            .factory => .{ .metal = 320, .seconds = 25 },
+            .power => .{ .metal = 70, .seconds = 8 },
+            .mine => .{ .metal = 60, .seconds = 10 },
+            .silo => .{ .metal = 400, .seconds = 30 },
+            .battery => .{ .metal = 80, .seconds = 8 },
+            .missile => .{ .metal = 300, .seconds = 40 },
         };
     }
 };
 
-pub const Cost = struct { metal: f32, energy: f32, seconds: f32 };
+/// What making one costs, in metal (energy is not spent making things:
+/// buildings use it as they run, see `energyUse`).
+pub const Cost = struct { metal: f32, seconds: f32 };
+
+/// How much energy a building uses each second as it runs (less than
+/// nothing: makes); with none stored (and not enough made), what uses it
+/// stops.
+pub fn energyUse(k: Kind) f32 {
+    return switch (k) {
+        .power => -12,
+        .factory => 2,
+        .mine => 1.5,
+        .silo => 1,
+        .tower => 0.5,
+        else => 0,
+    };
+}
+
+/// How much energy a player can store, and how much more each battery
+/// holds.
+pub const base_storage: f32 = 500;
+pub const battery_storage: f32 = 1000;
 
 /// Repairing: how much of its health a building gets back a second, and
 /// the metal each point costs (a factory, from nothing: 300).
@@ -235,7 +261,7 @@ pub fn missileAt(map: *const Map, t: Thing, s: f32) V3 {
 /// What a factory makes.
 pub const buildable = [_]Kind{ .walker, .tank, .flak, .builder, .drone, .fighter, .bomber, .air_builder };
 /// What a builder builds.
-pub const constructible = [_]Kind{ .power, .mine, .tower, .factory, .silo };
+pub const constructible = [_]Kind{ .power, .battery, .mine, .tower, .factory, .silo };
 
 /// A builder's order: to build a `kind` at `at`, facing `yaw`.
 pub const Order = struct {
@@ -290,6 +316,9 @@ pub const Thing = struct {
     armed: bool = false,
     /// A building's: being repaired (healing, paid for in metal).
     repairing: bool = false,
+    /// A building's: whether it has energy to run (short of it, some are
+    /// shut down).
+    powered: bool = true,
     /// A missile's: where it was launched from (it is going to `rally`),
     /// how long its flight takes, and how long it has flown.
     launch: [2]f32 = .{ 0, 0 },
@@ -334,15 +363,27 @@ pub const Thing = struct {
 pub const Resources = struct {
     metal: f32 = 300,
     energy: f32 = 300,
+    /// How much energy can be stored (see `base_storage`), and how much
+    /// more is made than used each second (less than nothing: used).
+    storage: f32 = base_storage,
+    net: f32 = 0,
+    /// Short of energy: some buildings shut down (see `World.useEnergy`),
+    /// and how many.
+    short: bool = false,
+    shut_down: u16 = 0,
 };
 
-/// What a building makes each second.
-pub fn income(k: Kind) Resources {
+/// Short of energy, which buildings are shut down changes this often
+/// (seconds); and how much must be stored again before all run.
+const shuffle_seconds: f32 = 4;
+const recovered: f32 = 25;
+
+/// The metal a building digs (or makes) each second (when powered).
+pub fn metalIncome(k: Kind) f32 {
     return switch (k) {
-        .power => .{ .metal = 0, .energy = 6 },
-        .mine => .{ .metal = 4, .energy = 0 },
-        .factory => .{ .metal = 1, .energy = 1 },
-        else => .{ .metal = 0, .energy = 0 },
+        .mine => 4,
+        .factory => 1,
+        else => 0,
     };
 }
 
@@ -545,7 +586,7 @@ pub const World = struct {
         const c = Kind.missile.cost();
         const part = dt / c.seconds;
         const r = &w.resources[t.team];
-        if (r.metal < c.metal * part) return;
+        if (!t.powered or r.metal < c.metal * part) return;
         r.metal -= c.metal * part;
         t.progress += part;
         if (t.progress < 1) return;
@@ -641,6 +682,7 @@ pub const World = struct {
     /// On by `dt` seconds.
     pub fn step(w: *World, dt: f32) void {
         w.time += dt;
+        w.useEnergy(dt);
         for (w.all(), 0..) |*t, i| {
             if (t.built < 1) continue;
             if (t.repairing) w.repair(t, dt);
@@ -655,14 +697,71 @@ pub const World = struct {
                 .factory => w.make(t, dt),
                 .mine, .power => t.phase += dt * 2,
                 .silo => w.buildMissile(t, dt),
+                .battery => t.phase += dt,
                 .missile => w.flyMissile(t, dt),
             }
-            const inc = income(t.kind);
-            w.resources[t.team].metal += inc.metal * dt;
-            w.resources[t.team].energy += inc.energy * dt;
+            if (t.powered) w.resources[t.team].metal += metalIncome(t.kind) * dt;
         }
         combat.step(w, dt);
         w.removeDestroyed();
+    }
+
+    /// Each player's buildings make and use energy: what is stored goes up
+    /// (as far as there is room for) or down. With none left, and more
+    /// used than made, just enough buildings are shut down for what runs
+    /// to use no more than is made: which, picked at random, changing
+    /// every few seconds; all run again once some is stored.
+    fn useEnergy(w: *World, dt: f32) void {
+        var made: [4]f32 = @splat(0);
+        var used: [4]f32 = @splat(0);
+        var storage: [4]f32 = @splat(base_storage);
+        for (w.things[0..w.count]) |t| {
+            if (!t.kind.isBuilding() or t.built < 1) continue;
+            const e = energyUse(t.kind);
+            if (e < 0) made[t.team] -= e else used[t.team] += e;
+            if (t.kind == .battery) storage[t.team] += battery_storage;
+        }
+        const slot: u32 = @intFromFloat(@max(0, w.time) / shuffle_seconds);
+        for (&w.resources, 0..) |*r, team| {
+            r.storage = storage[team];
+            if (r.short) {
+                if (r.energy >= recovered or made[team] >= used[team]) r.short = false;
+            } else if (r.energy <= 0 and used[team] > made[team]) r.short = true;
+            // What runs: all; or, short, as many as what is made runs (in
+            // an order picked at random for this while).
+            var running = used[team];
+            r.shut_down = 0;
+            for (w.things[0..w.count]) |*t| {
+                if (t.team == team) t.powered = true;
+            }
+            if (r.short) {
+                running = 0;
+                var order: [max_things]struct { key: u32, i: u16 } = undefined;
+                var n: usize = 0;
+                for (w.things[0..w.count], 0..) |t, i| {
+                    if (t.team != team or !t.kind.isBuilding() or t.built < 1 or energyUse(t.kind) <= 0) continue;
+                    order[n] = .{ .key = shuffleKey(slot, @intCast(i), t.kind), .i = @intCast(i) };
+                    n += 1;
+                }
+                std.mem.sort(@TypeOf(order[0]), order[0..n], {}, struct {
+                    fn less(_: void, a: @TypeOf(order[0]), b: @TypeOf(order[0])) bool {
+                        return a.key < b.key;
+                    }
+                }.less);
+                for (order[0..n]) |o| {
+                    const t = &w.things[o.i];
+                    const e = energyUse(t.kind);
+                    if (running + e <= made[team] + 1e-4) {
+                        running += e;
+                    } else {
+                        t.powered = false;
+                        r.shut_down += 1;
+                    }
+                }
+            }
+            r.net = made[team] - running;
+            r.energy = std.math.clamp(r.energy + r.net * dt, 0, r.storage);
+        }
     }
 
     pub fn addShot(w: *World, s: combat.Shot) void {
@@ -892,9 +991,8 @@ pub const World = struct {
             const c = o.kind.cost();
             const part = dt / c.seconds;
             const r = &w.resources[t.team];
-            if (r.metal < c.metal * part or r.energy < c.energy * part) return;
+            if (r.metal < c.metal * part) return;
             r.metal -= c.metal * part;
-            r.energy -= c.energy * part;
             b.built = @min(1, b.built + part);
             if (b.built >= 1) {
                 t.order = null;
@@ -927,9 +1025,8 @@ pub const World = struct {
         const r = &w.resources[f.team];
         // Paid for bit by bit, as it is made.
         const part = dt / c.seconds;
-        if (r.metal < c.metal * part or r.energy < c.energy * part) return;
+        if (!f.powered or r.metal < c.metal * part) return;
         r.metal -= c.metal * part;
-        r.energy -= c.energy * part;
         f.progress += part;
         if (f.progress < 1) return;
         f.progress = 0;
@@ -943,6 +1040,17 @@ pub const World = struct {
         }
     }
 };
+
+/// Where building `i` comes, this while (`slot`), in the order buildings
+/// get energy when there is not enough: at random, but the same all
+/// while.
+fn shuffleKey(slot: u32, i: u32, k: Kind) u32 {
+    var h = slot *% 0x9e3779b9 ^ i *% 0x85ebca6b ^ @as(u32, @intFromEnum(k)) *% 0xc2b2ae35;
+    h ^= h >> 16;
+    h *%= 0x7feb352d;
+    h ^= h >> 15;
+    return h;
+}
 
 pub fn wrap(a: f32) f32 {
     return std.math.atan2(@sin(a), @cos(a));
@@ -1093,10 +1201,11 @@ test "a building half built: does nothing until it is finished" {
     defer testing.allocator.destroy(tw.world);
     const w = tw.world;
     const b = map_mod.bases[0];
-    _ = w.add(.{ .kind = .power, .team = 0, .pos = .{ b[0], 0, b[1] }, .built = 0.5 }).?;
-    const before = w.resources[0].energy;
+    _ = w.add(.{ .kind = .mine, .team = 0, .pos = .{ b[0], 0, b[1] }, .built = 0.5 }).?;
+    const before = w.resources[0];
     w.step(1);
-    try testing.expectEqual(before, w.resources[0].energy);
+    try testing.expectEqual(before.metal, w.resources[0].metal);
+    try testing.expectEqual(before.energy, w.resources[0].energy);
 }
 
 test "sent past a forest, a tank finds its way round it and gets there" {
@@ -1142,7 +1251,7 @@ test "repairing: a damaged building heals, paying metal; it stops when whole, an
     const f = w.add(.{ .kind = .tower, .team = 0, .pos = .{ b[0], 0, b[1] } }).?;
     const most = combat.maxHealth(.tower);
     w.things[f].health = most / 2;
-    w.resources[0] = .{ .metal = 1000, .energy = 1000 };
+    w.resources[0] = .{ .metal = 1000 };
     w.toggleRepair(&.{f}, 0);
     try testing.expect(w.things[f].repairing);
     for (0..60 * 5) |_| w.step(1.0 / 60.0);
@@ -1164,4 +1273,73 @@ test "repairing: a damaged building heals, paying metal; it stops when whole, an
     for (0..60 * 30) |_| w.step(1.0 / 60.0);
     try testing.expectEqual(most, w.things[f].health);
     try testing.expect(!w.things[f].repairing);
+}
+
+test "energy: buildings use it as they run, power plants make it; batteries store more" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    const b = map_mod.bases[0];
+    _ = w.add(.{ .kind = .power, .team = 0, .pos = .{ b[0], 0, b[1] } }).?;
+    _ = w.add(.{ .kind = .factory, .team = 0, .pos = .{ b[0] + 6, 0, b[1] } }).?;
+    w.resources[0].energy = 100;
+    w.step(1);
+    // Made 12, used 2.
+    try testing.expectApproxEqAbs(@as(f32, 10), w.resources[0].net, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 110), w.resources[0].energy, 0.01);
+    // As much as can be stored, no more; a battery stores more.
+    for (0..100) |_| w.step(1);
+    try testing.expectEqual(base_storage, w.resources[0].energy);
+    _ = w.add(.{ .kind = .battery, .team = 0, .pos = .{ b[0] - 6, 0, b[1] } }).?;
+    for (0..100) |_| w.step(1);
+    try testing.expectEqual(base_storage + battery_storage, w.resources[0].energy);
+    try testing.expectEqual(base_storage + battery_storage, w.resources[0].storage);
+    // Making a unit costs metal, not energy.
+    const metal = w.resources[0].metal;
+    for (w.all(), 0..) |t, i| if (t.kind == .factory) {
+        _ = w.enqueue(i, .walker);
+    };
+    const energy = w.resources[0].energy;
+    for (0..60 * 5) |_| w.step(1.0 / 60.0);
+    try testing.expect(w.resources[0].metal < metal + 5 * 1 - Kind.walker.cost().metal + 1);
+    try testing.expectEqual(energy, w.resources[0].energy);
+}
+
+test "short of energy: just enough buildings shut down, which changing; all run once some is stored" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    const c = map_mod.centre;
+    _ = w.add(.{ .kind = .power, .team = 0, .pos = .{ c[0], 0, c[1] } }).?;
+    // Ten mines: 15 used, 12 made.
+    for (0..10) |k| _ = w.add(.{ .kind = .mine, .team = 0, .pos = .{ c[0] - 20 + @as(f32, @floatFromInt(k)) * 4, 0, c[1] + 8 } }).?;
+    w.resources[0].energy = 10;
+    for (0..10) |_| w.step(1);
+    const r = w.resources[0];
+    try testing.expect(r.short);
+    // Eight run (12), two do not.
+    try testing.expectEqual(@as(u16, 2), r.shut_down);
+    try testing.expect(r.net >= 0);
+    var off_before: [2]usize = undefined;
+    var n: usize = 0;
+    for (w.all(), 0..) |t, i| if (!t.powered) {
+        off_before[n] = i;
+        n += 1;
+    };
+    // Some time on: others shut down instead (at least once).
+    var changed = false;
+    for (0..8) |_| {
+        for (0..60 * 4) |_| w.step(1.0 / 60.0);
+        for (w.all(), 0..) |t, i| if (!t.powered and i != off_before[0] and i != off_before[1]) {
+            changed = true;
+        };
+    }
+    try testing.expect(changed);
+    // A battery's worth stored (another power plant): all run.
+    _ = w.add(.{ .kind = .power, .team = 0, .pos = .{ c[0] + 10, 0, c[1] - 8 } }).?;
+    for (0..60 * 10) |_| w.step(1.0 / 60.0);
+    try testing.expect(!w.resources[0].short);
+    for (w.all()) |t| try testing.expect(t.powered);
 }

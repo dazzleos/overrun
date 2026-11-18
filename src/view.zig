@@ -83,6 +83,19 @@ fn resources(cx: *kete.BuildContext, g: *Game) kete.Widget {
             counter(cx, r.metal),
             cx.make(kete.Icon{ .icon = .bolt, .size = 20, .color = gfx.Color.argb(0xffffd25a) }),
             counter(cx, r.energy),
+            // How much can be stored, and how fast it is going up (or down).
+            cx.make(kete.SizedBox{ .width = 52, .height = 24, .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(kete.Text{ .text = cx.fmt("/ {d:.0}", .{r.storage}), .style = .{ .size = 13, .color = gfx.Color.argb(0xffa8b0bc) }, .wrap = false }) }) }),
+            cx.make(kete.SizedBox{ .width = 44, .height = 24, .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(kete.Text{
+                .text = cx.fmt("{s}{d:.0}", .{ if (r.net >= 0) "+" else "", r.net }),
+                .style = .{ .size = 13, .color = gfx.Color.argb(if (r.short) 0xfff05e5e else if (r.net >= 0) 0xff6ee08a else 0xffffb35a) },
+                .wrap = false,
+            }) }) }),
+            // Short of energy: how many buildings are shut down.
+            cx.make(kete.SizedBox{ .width = 48, .height = 24, .child = cx.make(kete.Align{ .alignment = .center_left, .child = cx.make(kete.Text{
+                .text = if (r.short) cx.fmt("{d} off", .{r.shut_down}) else "",
+                .style = .{ .size = 13, .color = gfx.Color.argb(0xfff05e5e) },
+                .wrap = false,
+            }) }) }),
             cx.make(kete.Icon{ .icon = weatherIcon(g), .size = 20, .color = gfx.Color.argb(if (sky.isNight(g.world.time)) 0xff9fb4ff else 0xffe8eef6) }),
         }) catch &.{},
     }) }) });
@@ -212,8 +225,8 @@ fn kindCell(cx: *kete.BuildContext, k: Kind, on: bool, active: bool, note: []con
             cx.make(kete.Row{ .fill = false, .spacing = 3, .cross_axis_alignment = .center, .children = a.dupe(kete.Widget, &.{
                 cx.make(kete.Icon{ .icon = .construction, .size = 12, .color = gfx.Color.argb(0xffc8ccd2) }),
                 label(cx, cx.fmt("{d:.0}", .{c.metal}), 12),
-                cx.make(kete.Icon{ .icon = .bolt, .size = 12, .color = gfx.Color.argb(0xffffd25a) }),
-                label(cx, cx.fmt("{d:.0}", .{c.energy}), 12),
+                if (units.energyUse(k) != 0) cx.make(kete.Icon{ .icon = .bolt, .size = 12, .color = gfx.Color.argb(0xffffd25a) }) else cx.make(kete.SizedBox{ .width = 0 }),
+                if (units.energyUse(k) != 0) label(cx, cx.fmt("{d:.1}/s", .{-units.energyUse(k)}), 12) else cx.make(kete.SizedBox{ .width = 0 }),
             }) catch &.{} }),
             label(cx, note, 12),
         }) catch &.{} }) }) }),
@@ -222,7 +235,7 @@ fn kindCell(cx: *kete.BuildContext, k: Kind, on: bool, active: bool, note: []con
 
 // The icons chosen at run time (`iconOf`, and the window buttons').
 comptime {
-    _ = &[_]kete.IconName{ .build, .rocket, .rocket_launch, .my_location, .local_airport, .airplanemode_active, .radar, .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
+    _ = &[_]kete.IconName{ .battery_charging_full, .build, .rocket, .rocket_launch, .my_location, .local_airport, .airplanemode_active, .radar, .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
 }
 
 fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {
@@ -237,6 +250,7 @@ fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {
         .flak => .radar,
         .missile => .rocket,
         .silo => .rocket_launch,
+        .battery => .battery_charging_full,
         .power => .bolt,
         .mine => .diamond,
         .tower => .security,
@@ -668,7 +682,7 @@ test "the resources' counters: what is after them stays put as they change" {
     const view: Overrun = .{ .game = &g };
     var widths: [3]f32 = undefined;
     for ([_]f32{ 7, 1234, 99999 }, 0..) |amount, k| {
-        g.world.resources[game_mod.me] = .{ .metal = amount, .energy = amount };
+        g.world.resources[game_mod.me] = .{ .metal = amount, .energy = amount, .storage = 99999, .net = -amount };
         u.frame(1280, 720, 0, view);
         try testing.expect(!overflows(u.root.?));
         widths[k] = panelWidth(u.root.?).?;
@@ -680,7 +694,7 @@ test "the resources' counters: what is after them stays put as they change" {
 /// The resources' panel's width (the first rounded box, top left).
 fn panelWidth(node: *kete.WidgetNode) ?f32 {
     for (node.children.items) |ch| {
-        if (ch.size.h > 20 and ch.size.h < 60 and ch.size.w > 150 and ch.size.w < 400) return ch.size.w;
+        if (ch.size.h > 20 and ch.size.h < 60 and ch.size.w > 150 and ch.size.w < 700) return ch.size.w;
         if (panelWidth(ch)) |w| return w;
     }
     return null;
