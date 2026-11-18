@@ -80,13 +80,25 @@ fn resources(cx: *kete.BuildContext, g: *Game) kete.Widget {
         .cross_axis_alignment = .center,
         .children = cx.arena.dupe(kete.Widget, &.{
             cx.make(kete.Icon{ .icon = .construction, .size = 20, .color = gfx.Color.argb(0xffc8ccd2) }),
-            label(cx, cx.fmt("{d:.0}", .{r.metal}), 18),
+            counter(cx, r.metal),
             cx.make(kete.Icon{ .icon = .bolt, .size = 20, .color = gfx.Color.argb(0xffffd25a) }),
-            label(cx, cx.fmt("{d:.0}", .{r.energy}), 18),
+            counter(cx, r.energy),
             cx.make(kete.Icon{ .icon = weatherIcon(g), .size = 20, .color = gfx.Color.argb(if (sky.isNight(g.world.time)) 0xff9fb4ff else 0xffe8eef6) }),
         }) catch &.{},
     }) }) });
 }
+
+/// A resource's amount, in a box as wide as five figures (so what is
+/// after it stays put as it changes), to its right.
+fn counter(cx: *kete.BuildContext, amount: f32) kete.Widget {
+    return cx.make(kete.SizedBox{ .width = counter_width, .height = 24, .child = cx.make(kete.Align{
+        .alignment = .center_right,
+        .child = label(cx, cx.fmt("{d:.0}", .{@min(amount, 99999)}), 18),
+    }) });
+}
+
+/// Wide enough for "99999".
+const counter_width = 56;
 
 /// What is chosen, at the bottom: a factory's panel (what it makes), the
 /// builders' (what they build), or how many units.
@@ -572,6 +584,34 @@ test "the minimap turned as the view is: the view upright on it" {
     const back = m.mapAt(m.at(.{ 200, 150 }));
     try testing.expectApproxEqAbs(@as(f32, 200), back[0], 1e-2);
     try testing.expectApproxEqAbs(@as(f32, 150), back[1], 1e-2);
+}
+
+test "the resources' counters: what is after them stays put as they change" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    var g = try Game.init(testing.allocator, 1);
+    defer g.deinit();
+    g.closeMenu();
+    const view: Overrun = .{ .game = &g };
+    var widths: [3]f32 = undefined;
+    for ([_]f32{ 7, 1234, 99999 }, 0..) |amount, k| {
+        g.world.resources[game_mod.me] = .{ .metal = amount, .energy = amount };
+        u.frame(1280, 720, 0, view);
+        try testing.expect(!overflows(u.root.?));
+        widths[k] = panelWidth(u.root.?).?;
+    }
+    try testing.expectEqual(widths[0], widths[1]);
+    try testing.expectEqual(widths[0], widths[2]);
+}
+
+/// The resources' panel's width (the first rounded box, top left).
+fn panelWidth(node: *kete.WidgetNode) ?f32 {
+    for (node.children.items) |ch| {
+        if (ch.size.h > 20 and ch.size.h < 60 and ch.size.w > 150 and ch.size.w < 400) return ch.size.w;
+        if (panelWidth(ch)) |w| return w;
+    }
+    return null;
 }
 
 fn overflows(node: *kete.WidgetNode) bool {
