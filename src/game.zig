@@ -5,9 +5,10 @@
 //!   takes it out); dragging a box chooses the units in it.
 //! - With units chosen, clicking the ground sends them there.
 //! - A factory chosen, its panel queues units to make.
-//! - The arrow keys (or W, A, S, D) move the view, the wheel zooms it.
-//! - Esc opens the menu (the game starts in it); right-clicking lets go of
-//!   what is chosen.
+//! - Dragging with the right button moves the view (the ground follows the
+//!   pointer); so do the arrow keys (or W, A, S, D). The wheel zooms it.
+//! - Esc opens the menu (the game starts in it); right-clicking (without
+//!   dragging) lets go of what is chosen.
 
 const std = @import("std");
 const kete = @import("kete");
@@ -19,6 +20,10 @@ const V3 = math.V3;
 const Map = map_mod.Map;
 const World = units.World;
 const Kind = units.Kind;
+
+/// How far in and out the view zooms (blocks from its middle to its top).
+const min_zoom: f32 = 6;
+const max_zoom: f32 = 24;
 
 /// How far the mouse moves with a button down before it is a drag.
 const drag_threshold: f32 = 6;
@@ -42,6 +47,9 @@ pub const Game = struct {
     view_size: [2]f32 = .{ 1, 1 },
     /// A button down at (where, and whether it has become a drag).
     press: ?struct { at: kete.Point, now: kete.Point, dragging: bool } = null,
+    /// The right button down: where the pointer was last, and whether it
+    /// has moved the view (not a click).
+    pan: ?struct { last: kete.Point, moved: bool } = null,
     shift: bool = false,
     keys: std.EnumSet(kete.KeyboardKey) = .empty,
     /// Where units were last sent, and when (a mark shows there a while).
@@ -81,6 +89,7 @@ pub const Game = struct {
         const b = map_mod.bases[me];
         g.camera.target = .{ b[0] + 4, g.map.heightAt(b[0], b[1]), b[1] + 4 };
         g.sent = null;
+        g.keepViewOnMap();
     }
 
     pub fn startNew(g: *Game) void {
@@ -129,15 +138,8 @@ pub const Game = struct {
         if (g.keys.contains(.up) or g.keys.contains(.w)) dz += 1;
         if (g.keys.contains(.down) or g.keys.contains(.s)) dz -= 1;
         if (dx != 0 or dz != 0) {
-            // Across the screen and up it, on the ground.
-            const r = g.camera.right();
-            const f = math.normalize(.{ g.camera.forward()[0], 0, g.camera.forward()[2] });
             const speed = g.camera.zoom * 1.4 * dt;
-            const moved = g.camera.target + (r * math.splat(dx) + f * math.splat(dz)) * math.splat(speed);
-            // Over the map (its hexagon), a little in from its edge (the
-            // ground past it is there to the edge of the view).
-            if (map_mod.inside(moved[0], moved[2]) > 6) g.camera.target = moved;
-            g.camera.target[1] = g.map.surfaceAt(g.camera.target[0], g.camera.target[2]);
+            g.moveView(.{ dx * speed, dz * speed });
         }
     }
 
@@ -150,9 +152,96 @@ pub const Game = struct {
         }
     }
 
+    /// Where on the ground (at the view's middle's height) a point of the
+    /// view (x and y from -1 to 1, y up) is, with the camera at `target`
+    /// and `zoom`.
+    fn groundOfView(g: *const Game, target: V3, zoom_: f32, x: f32, y: f32) [2]f32 {
+        var c = g.camera;
+        c.target = target;
+        c.zoom = zoom_;
+        const r = c.ray(g.aspect(), x, y);
+        const t = (target[1] - r.origin[1]) / r.dir[1];
+        const p = r.origin + r.dir * math.splat(t);
+        return .{ p[0], p[2] };
+    }
+
+    /// Whether the view (its middle at `target`, at `zoom`) keeps to the
+    /// map: the middle of each of the screen's edges over it (the map's
+    /// edge can reach the screen's, not come in from it).
+    pub fn viewFits(g: *const Game, target: V3, zoom_: f32) bool {
+        for ([_][2]f32{ .{ -1, 0 }, .{ 1, 0 }, .{ 0, -1 }, .{ 0, 1 } }) |n| {
+            const p = g.groundOfView(target, zoom_, n[0], n[1]);
+            if (map_mod.inside(p[0], p[1]) < 0) return false;
+        }
+        return true;
+    }
+
+    /// The view put back on the map: zoomed in until it fits at the map's
+    /// middle, and moved towards the middle until it fits where it is.
+    pub fn keepViewOnMap(g: *Game) void {
+        const mid = V3{ map_mod.centre[0], g.map.surfaceAt(map_mod.centre[0], map_mod.centre[1]), map_mod.centre[1] };
+        while (!g.viewFits(mid, g.camera.zoom) and g.camera.zoom > min_zoom) g.camera.zoom = @max(min_zoom, g.camera.zoom * 0.95);
+        var i: u32 = 0;
+        while (!g.viewFits(g.camera.target, g.camera.zoom) and i < 200) : (i += 1) {
+            const to = mid - g.camera.target;
+            const d = math.length(to);
+            if (d < 0.5) {
+                g.camera.target = mid;
+                break;
+            }
+            g.camera.target += to * math.splat(@min(1, 0.5 / d));
+            g.camera.target[1] = g.map.surfaceAt(g.camera.target[0], g.camera.target[2]);
+        }
+    }
+
+    /// Moves the view's middle `by` blocks across the screen (right) and
+    /// up it, on the ground; as far as the map's edge reaching the
+    /// screen's (see `viewFits`), sliding along the edge rather than
+    /// stopping at it.
+    pub fn moveView(g: *Game, by: [2]f32) void {
+        const r = g.camera.right();
+        const f = math.normalize(.{ g.camera.forward()[0], 0, g.camera.forward()[2] });
+        const step = r * math.splat(by[0]) + f * math.splat(by[1]);
+        for ([_]V3{ step, r * math.splat(by[0]), f * math.splat(by[1]) }) |s| {
+            var moved = g.camera.target + s;
+            moved[1] = g.map.surfaceAt(moved[0], moved[2]);
+            if (!g.viewFits(moved, g.camera.zoom)) continue;
+            g.camera.target = moved;
+            return;
+        }
+    }
+
+    pub fn panDown(g: *Game, p: kete.Point) void {
+        g.pan = .{ .last = p, .moved = false };
+    }
+
+    /// The right button held and the pointer moved: the ground follows it.
+    pub fn panMoved(g: *Game, p: kete.Point) void {
+        const pan = &(g.pan orelse return);
+        const dx = p[0] - pan.last[0];
+        const dy = p[1] - pan.last[1];
+        if (!pan.moved and @abs(dx) + @abs(dy) < drag_threshold) return;
+        pan.moved = true;
+        pan.last = p;
+        // A pixel, in blocks across the screen; up it, the ground slants
+        // away (seen from the camera's angle), so it is further.
+        const per_pixel = 2 * g.camera.zoom / g.view_size[1];
+        g.moveView(.{ -dx * per_pixel, dy * per_pixel / @sin(g.camera.pitch) });
+    }
+
+    /// The right button let go: true if it was a click (it did not move the
+    /// view).
+    pub fn panUp(g: *Game) bool {
+        const pan = g.pan orelse return false;
+        g.pan = null;
+        return !pan.moved;
+    }
+
+    /// Zooms in (or out), as far out as the view still keeps to the map
+    /// (moved towards its middle, near its edge, to keep to it).
     pub fn zoom(g: *Game, by: f32) void {
-        // No further out than the ground past the map reaches.
-        g.camera.zoom = std.math.clamp(g.camera.zoom * by, 6, 24);
+        g.camera.zoom = std.math.clamp(g.camera.zoom * by, min_zoom, max_zoom);
+        g.keepViewOnMap();
     }
 
     // --- The mouse ----------------------------------------------------------------------
@@ -362,4 +451,52 @@ test "a factory chosen: its panel's buttons queue units" {
     try testing.expectEqual(@as(u32, 2), g.world.things[f].queuedOf(.drone));
     g.dequeue(.drone);
     try testing.expectEqual(@as(u32, 1), g.world.things[f].queuedOf(.drone));
+}
+
+test "dragging with the right button moves the view, the ground following the pointer" {
+    var g = try testGame();
+    defer g.deinit();
+    // At the map's middle (room to move every way).
+    g.camera.target = .{ map_mod.centre[0], g.map.surfaceAt(map_mod.centre[0], map_mod.centre[1]), map_mod.centre[1] };
+    const before = g.camera.target;
+    // A point of the ground, on the view, before.
+    const ground = before + V3{ 3, 0, 2 };
+    const was = g.onView(.{ ground[0], g.map.heightAt(ground[0], ground[2]), ground[2] });
+    g.panDown(.{ 600, 400 });
+    g.panMoved(.{ 700, 300 });
+    g.panMoved(.{ 760, 330 });
+    try testing.expect(!g.panUp());
+    // The view moved; the same ground is as far along as the pointer.
+    try testing.expect(math.length(g.camera.target - before) > 1);
+    const now = g.onView(.{ ground[0], g.map.heightAt(ground[0], ground[2]), ground[2] });
+    try testing.expectApproxEqAbs(was[0] + 160, now[0], 2);
+    try testing.expectApproxEqAbs(was[1] - 70, now[1], 8);
+    // A right-click without moving: a click.
+    g.panDown(.{ 600, 400 });
+    g.panMoved(.{ 602, 401 });
+    try testing.expect(g.panUp());
+}
+
+test "the view keeps to the map: its edge can reach the screen's, not come in from it" {
+    var g = try testGame();
+    defer g.deinit();
+    for ([_][2]f32{ .{ 1920, 1080 }, .{ 640, 400 }, .{ 1024, 768 } }) |size| {
+        g.view_size = size;
+        g.camera.zoom = max_zoom;
+        g.keepViewOnMap();
+        try testing.expect(g.viewFits(g.camera.target, g.camera.zoom));
+        // Pushed hard each way: still on it, and as far as it goes.
+        for ([_][2]f32{ .{ 1, 0 }, .{ -1, 0 }, .{ 0, 1 }, .{ 0, -1 }, .{ 0.7, 0.7 } }) |d| {
+            for (0..400) |_| g.moveView(.{ d[0], d[1] });
+            try testing.expect(g.viewFits(g.camera.target, g.camera.zoom));
+            // The screen's corners past the map no further than the
+            // ground past it reaches.
+            for ([_][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ -1, 1 }, .{ 1, 1 } }) |c| {
+                const p = g.groundOfView(g.camera.target, g.camera.zoom, c[0], c[1]);
+                // (The ground past the map reaches 24 blocks or more from
+                // each edge: see map.zig.)
+                try testing.expect(-map_mod.inside(p[0], p[1]) < 24);
+            }
+        }
+    }
 }

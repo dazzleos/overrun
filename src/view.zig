@@ -180,8 +180,25 @@ const Battlefield = struct {
                     return true;
                 },
                 .right => {
-                    // A factory's last queued taken out, or what is chosen
-                    // let go of.
+                    // Dragging moves the view; a click is seen on release.
+                    g.panDown(pr.pos);
+                    return true;
+                },
+                else => return false,
+            },
+            .motion => |pos| {
+                g.pointerMoved(pos);
+                g.panMoved(pos);
+            },
+            .release => |r| switch (r.button) {
+                .left => {
+                    g.pointerUp(r.pos);
+                    return true;
+                },
+                .right => {
+                    // A right-click (not a drag): a factory's last queued
+                    // taken out, or what is chosen let go of.
+                    if (!g.panUp()) return true;
                     if (g.chosenFactory()) |f| {
                         if (g.world.things[f].queued > 0) {
                             g.dequeue(g.world.things[f].queue[g.world.things[f].queued - 1]);
@@ -191,12 +208,7 @@ const Battlefield = struct {
                     g.letGo();
                     return true;
                 },
-                else => return false,
-            },
-            .motion => |pos| g.pointerMoved(pos),
-            .release => |r| if (r.button == .left) {
-                g.pointerUp(r.pos);
-                return true;
+                else => {},
             },
             .scroll => |s| {
                 g.zoom(if (s.dy > 0) 1.12 else 1.0 / 1.12);

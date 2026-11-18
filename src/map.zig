@@ -22,10 +22,13 @@ const Vertex = mesh.Vertex;
 pub const size = 96;
 /// How far apart the rows of corners are.
 pub const row_gap: f32 = 0.8660254;
-/// Corners, and rows of them, past the hexagon's square each way (the
-/// ground seen past its edge, to the edge of the view).
-pub const margin_cols = 48;
-pub const margin_rows = 56;
+/// Corners, and rows of them, past the hexagon's square each way: the
+/// ground seen past its edge, in the view's corners (the view stops where
+/// the map's edge reaches the screen's: see game.zig's `viewFits`), up to
+/// 21 blocks past it, 24 past its corners. Each a whole number of chunks
+/// across, with the middle on an even row.
+pub const margin_cols = 32;
+pub const margin_rows = 32;
 /// Corners in a row, and rows: the hexagon's square (`size` across, 112
 /// rows down), and the margins.
 pub const cols = size + 2 * margin_cols + 1;
@@ -355,7 +358,7 @@ test "the map is a hexagon: its corners on the lattice; past it, the ground dimm
             if (d < -2) brightest_out = @max(brightest_out, light) else if (d > 2) brightest_in = @max(brightest_in, light);
         }
     };
-    try testing.expect(farthest < -40);
+    try testing.expect(farthest < -24);
     // The chunks cover all of it.
     try testing.expectEqual(@as(usize, cols - 1), chunks_x * chunk);
     try testing.expectEqual(@as(usize, rows - 1), chunks_z * chunk);
