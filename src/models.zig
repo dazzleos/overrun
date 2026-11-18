@@ -28,6 +28,14 @@ pub fn thing(b: *Builder, t: *const Thing) void {
     const team = rgb(units.team_colours[t.team]);
     const f = Frame.of(t.yaw, 0, 0).scaled(t.kind.scale());
     const p = t.pos;
+    // Armoured: steel plates round its foot.
+    if (t.armoured) {
+        const r = t.kind.radius() * 0.86 + 0.05;
+        b.box(f, f.at(p, .{ 0, 0.18, 0 }), .{ r, 0.18, r }, .{ 0.97, 0.97 }, rgb(0x3d434a));
+        for ([4][2]f32{ .{ 1, 1 }, .{ -1, 1 }, .{ 1, -1 }, .{ -1, -1 } }) |c| {
+            b.box(f, f.at(p, .{ c[0] * r, 0.25, c[1] * r }), .{ 0.12, 0.25, 0.12 }, .{ 0.8, 0.8 }, rgb(0x2a2e33));
+        }
+    }
     switch (t.kind) {
         .walker => walker(b, f, p, t, team),
         .tank => tank(b, f, p, t, team),
@@ -40,6 +48,7 @@ pub fn thing(b: *Builder, t: *const Thing) void {
         .missile => missile(b, p, t),
         .silo => silo(b, f, p, t, team),
         .battery => battery(b, f, p, t, team),
+        .air_factory => airFactory(b, f, p, t, team),
         .tower => tower(b, f, p, t, team),
         .factory => factory(b, f, p, t, team),
         .power => power(b, f, p, t, team),
@@ -259,6 +268,22 @@ fn factory(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
     const mast = f.at(p, .{ 1.2, 1.6, 1.2 });
     b.box(f, f.at(mast, .{ 0, 0.4, 0 }), .{ 0.1, 0.4, 0.1 }, .{ 1, 1 }, dark);
     b.box(crane, crane.at(mast, .{ 0, 0.85, -0.6 }), .{ 0.07, 0.06, 0.8 }, .{ 1, 1 }, glow);
+}
+
+/// A drone factory: a low hangar with a pad on its roof (a drone being
+/// made rises from it), lights round the pad glowing while it makes one.
+fn airFactory(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {
+    b.box(f, f.at(p, .{ 0, 0.55, 0.2 }), .{ 1.7, 0.55, 1.5 }, .{ 0.97, 0.97 }, metal);
+    b.prism(f.turned(std.math.pi / 2.0), f.at(p, .{ 0, 1.1, 0.2 }), 1.2, 0.08, 8, 1, dark);
+    b.box(f, f.at(p, .{ 0, 1.2, 0.2 }), .{ 0.7, 0.02, 0.12 }, .{ 1, 1 }, team);
+    b.box(f, f.at(p, .{ 0, 1.2, 0.2 }), .{ 0.12, 0.02, 0.7 }, .{ 1, 1 }, team);
+    const lit: f32 = if (t.queued > 0) 0.6 + 0.4 * @abs(@sin(t.phase * 3)) else 0.1;
+    for ([4][2]f32{ .{ 1, 1 }, .{ -1, 1 }, .{ 1, -1 }, .{ -1, -1 } }) |c| {
+        b.box(f, f.at(p, .{ c[0] * 1.05, 1.16, 0.2 + c[1] * 1.05 }), .{ 0.07, 0.05, 0.07 }, .{ 1, 1 }, mixRgb(black, glow, lit));
+    }
+    // A control tower at its back.
+    b.box(f, f.at(p, .{ 1.3, 1.5, 1.4 }), .{ 0.25, 0.4, 0.25 }, .{ 0.9, 0.9 }, dark);
+    b.box(f, f.at(p, .{ 1.3, 1.95, 1.4 }), .{ 0.32, 0.12, 0.32 }, .{ 1, 1 }, glass);
 }
 
 fn power(b: *Builder, f: Frame, p: V3, t: *const Thing, team: mesh.Rgb) void {

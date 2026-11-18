@@ -70,6 +70,10 @@ pub const Game = struct {
     camera: math.Camera,
     /// What is chosen: indices into the world's things.
     chosen: std.ArrayList(usize) = .empty,
+    /// Control groups: Ctrl and a number keeps what is chosen as that
+    /// group; Alt and the number chooses it again (twice: the view goes
+    /// to it).
+    groups: [10]std.ArrayList(usize) = @splat(.empty),
     /// The view's size, in its pixels (for picking).
     view_size: [2]f32 = .{ 1, 1 },
     /// A button down at (where, and whether it has become a drag).
@@ -107,6 +111,7 @@ pub const Game = struct {
 
     pub fn deinit(g: *Game) void {
         g.chosen.deinit(g.gpa);
+        for (&g.groups) |*group| group.deinit(g.gpa);
         g.gpa.destroy(g.world);
         g.minimap.destroy(g.gpa);
         g.gpa.destroy(g.fog);
@@ -172,12 +177,8 @@ pub const Game = struct {
         // they now are.
         if (g.world.removed_any) {
             if (g.targeting) |s| g.targeting = if (g.world.moved_to[s]) |to| to else null;
-            var n: usize = 0;
-            for (g.chosen.items) |i| if (g.world.moved_to[i]) |to| {
-                g.chosen.items[n] = to;
-                n += 1;
-            };
-            g.chosen.shrinkRetainingCapacity(n);
+            g.remap(&g.chosen);
+            for (&g.groups) |*group| g.remap(group);
         }
         g.fog_age += dt;
         if (g.fog_age >= fog_mod.every) {
@@ -196,6 +197,33 @@ pub const Game = struct {
             g.moveView(.{ dx * speed, dz * speed });
         }
         if (g.following) g.follow(dt);
+    }
+
+    /// What was taken out of the world, out of `list`; the rest where
+    /// they now are.
+    fn remap(g: *Game, list: *std.ArrayList(usize)) void {
+        var n: usize = 0;
+        for (list.items) |i| if (g.world.moved_to[i]) |to| {
+            list.items[n] = to;
+            n += 1;
+        };
+        list.shrinkRetainingCapacity(n);
+    }
+
+    /// Ctrl and a number: what is chosen kept as that group.
+    pub fn keepGroup(g: *Game, n: usize) void {
+        g.groups[n].clearRetainingCapacity();
+        g.groups[n].appendSlice(g.gpa, g.chosen.items) catch {};
+    }
+
+    /// Alt and a number: that group chosen (again: the view goes to it).
+    pub fn chooseGroup(g: *Game, n: usize) void {
+        const group = g.groups[n].items;
+        if (group.len == 0) return;
+        const again = std.mem.eql(usize, group, g.chosen.items);
+        g.chosen.clearRetainingCapacity();
+        g.chosen.appendSlice(g.gpa, group) catch {};
+        if (again) if (g.chosenMiddle()) |mid| g.lookAt(mid);
     }
 
     /// F: the view follows what is chosen (or stops following it).
@@ -241,6 +269,25 @@ pub const Game = struct {
             if (g.menu_open) g.closeMenu() else g.openMenu();
         }
         if (k == .f and !g.menu_open) g.toggleFollowing();
+        if (!g.menu_open) if (digitOf(k)) |n| {
+            if (g.keys.contains(.left_ctrl) or g.keys.contains(.right_ctrl)) g.keepGroup(n) else if (g.keys.contains(.left_alt) or g.keys.contains(.right_alt)) g.chooseGroup(n);
+        };
+    }
+
+    fn digitOf(k: kete.KeyboardKey) ?usize {
+        return switch (k) {
+            .digit_0 => 0,
+            .digit_1 => 1,
+            .digit_2 => 2,
+            .digit_3 => 3,
+            .digit_4 => 4,
+            .digit_5 => 5,
+            .digit_6 => 6,
+            .digit_7 => 7,
+            .digit_8 => 8,
+            .digit_9 => 9,
+            else => null,
+        };
     }
 
     /// Where on the ground (at the view's middle's height) a point of the
@@ -418,7 +465,7 @@ pub const Game = struct {
         if (g.chosen.items.len != 1) return null;
         const i = g.chosen.items[0];
         const t = g.world.things[i];
-        return if (t.kind == .factory and t.built >= 1) i else null;
+        return if (t.kind.isFactory() and t.built >= 1) i else null;
     }
 
     /// The silo chosen (alone, and built), if one is.
@@ -462,6 +509,21 @@ pub const Game = struct {
             metal += (most - t.health) * units.repair_metal;
         }
         return .{ .any = any, .repairing = any and all, .metal = metal };
+    }
+
+    /// The building chosen (alone) that can be armoured, or is being:
+    /// what it costs, and how far through it is.
+    pub fn armourable(g: *const Game) ?struct { i: usize, metal: f32, done: f32, armouring: bool } {
+        if (g.chosen.items.len != 1) return null;
+        const i = g.chosen.items[0];
+        const t = g.world.things[i];
+        if (!t.kind.isBuilding() or t.team != me or t.built < 1 or t.armoured) return null;
+        return .{ .i = i, .metal = units.armourCost(t.kind) * (1 - t.armour_done), .done = t.armour_done, .armouring = t.armouring };
+    }
+
+    pub fn toggleArmour(g: *Game) void {
+        const a = g.armourable() orelse return;
+        g.world.toggleArmour(a.i, me);
     }
 
     /// The chosen buildings repaired (or, all being, not).
@@ -699,11 +761,14 @@ test "a factory chosen: its panel's buttons queue units" {
     g.pointerDown(at);
     g.pointerUp(at);
     try testing.expectEqual(@as(?usize, f), g.chosenFactory());
+    g.enqueue(.tank);
+    g.enqueue(.tank);
+    try testing.expectEqual(@as(u32, 2), g.world.things[f].queuedOf(.tank));
+    g.dequeue(.tank);
+    try testing.expectEqual(@as(u32, 1), g.world.things[f].queuedOf(.tank));
+    // What flies is made in a drone factory, not here.
     g.enqueue(.drone);
-    g.enqueue(.drone);
-    try testing.expectEqual(@as(u32, 2), g.world.things[f].queuedOf(.drone));
-    g.dequeue(.drone);
-    try testing.expectEqual(@as(u32, 1), g.world.things[f].queuedOf(.drone));
+    try testing.expectEqual(@as(u32, 0), g.world.things[f].queuedOf(.drone));
 }
 
 test "dragging with the right button moves the view, the ground following the pointer" {
@@ -804,6 +869,38 @@ test "what is chosen and destroyed is let go of; the rest still chosen" {
     g.tick(0.01);
     try testing.expectEqual(@as(usize, 1), g.chosen.items.len);
     try testing.expectEqual(units.Kind.tank, g.world.things[g.chosen.items[0]].kind);
+}
+
+test "control groups: Ctrl and a number keeps what is chosen; Alt and it chooses it again" {
+    var g = try testGame();
+    defer g.deinit();
+    g.closeMenu();
+    var walkers: [2]usize = undefined;
+    var n: usize = 0;
+    for (g.world.all(), 0..) |t, i| if (t.team == me and t.kind == .walker and n < 2) {
+        walkers[n] = i;
+        n += 1;
+    };
+    g.chosen.appendSlice(testing.allocator, &walkers) catch {};
+    g.key(.left_ctrl, true);
+    g.key(.digit_3, true);
+    g.key(.digit_3, false);
+    g.key(.left_ctrl, false);
+    g.letGo();
+    try testing.expectEqual(@as(usize, 0), g.chosen.items.len);
+    g.key(.left_alt, true);
+    g.key(.digit_3, true);
+    g.key(.digit_3, false);
+    g.key(.left_alt, false);
+    try testing.expectEqualSlices(usize, &walkers, g.chosen.items);
+    // One destroyed: the group keeps the other (where it now is).
+    g.world.things[walkers[0]].health = 0;
+    g.tick(0.01);
+    try testing.expectEqual(@as(usize, 1), g.groups[3].items.len);
+    try testing.expectEqual(units.Kind.walker, g.world.things[g.groups[3].items[0]].kind);
+    // A group not kept: nothing changes.
+    g.chooseGroup(7);
+    try testing.expectEqual(@as(usize, 1), g.chosen.items.len);
 }
 
 test "a double click on a unit chooses all of its kind on the screen" {

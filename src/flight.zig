@@ -83,6 +83,8 @@ pub fn step(w: *World, t: *Thing, dt: f32) void {
         t.yaw = units.wrap(t.yaw + turned);
         if (fast) {
             want = hover_speed + (top - hover_speed) * t.tilt;
+            // Sent with others: no faster than the slowest of them.
+            if (t.cap > 0 and t.targets[0] == null) want = @min(want, @max(t.cap, hover_speed));
         } else {
             // Hovering in: slower as it gets there, and not until facing.
             const d = flatDist(t.pos, a);

@@ -39,7 +39,7 @@ pub const Kind = enum(u8) {
     missile,
     /// Guards the base: a gun on a column.
     tower,
-    /// Makes units (see `Thing.queue`).
+    /// Makes units that go on the ground (see `Thing.queue`).
     factory,
     /// Makes energy.
     power,
@@ -49,6 +49,13 @@ pub const Kind = enum(u8) {
     silo,
     /// Stores energy (see `battery_storage`).
     battery,
+    /// Makes units that fly.
+    air_factory,
+
+    /// Whether it makes units.
+    pub fn isFactory(k: Kind) bool {
+        return k == .factory or k == .air_factory;
+    }
 
     pub fn isBuilding(k: Kind) bool {
         return @intFromEnum(k) >= @intFromEnum(Kind.tower);
@@ -120,6 +127,7 @@ pub const Kind = enum(u8) {
             .missile => "Missile",
             .silo => "Missile silo",
             .battery => "Battery",
+            .air_factory => "Drone factory",
         };
     }
 
@@ -164,6 +172,7 @@ pub const Kind = enum(u8) {
             .missile => 0.4,
             .silo => 1.7,
             .battery => 1.0,
+            .air_factory => 2.1,
         };
     }
 
@@ -185,6 +194,7 @@ pub const Kind = enum(u8) {
             .missile => 0.5,
             .silo => 1.0,
             .battery => 1.4,
+            .air_factory => 1.7,
         };
     }
 
@@ -205,6 +215,7 @@ pub const Kind = enum(u8) {
             .mine => .{ .metal = 60, .seconds = 10 },
             .silo => .{ .metal = 400, .seconds = 30 },
             .battery => .{ .metal = 80, .seconds = 8 },
+            .air_factory => .{ .metal = 360, .seconds = 25 },
             .missile => .{ .metal = 300, .seconds = 40 },
         };
     }
@@ -220,7 +231,7 @@ pub const Cost = struct { metal: f32, seconds: f32 };
 pub fn energyUse(k: Kind) f32 {
     return switch (k) {
         .power => -12,
-        .factory => 2,
+        .factory, .air_factory => 2,
         .mine => 1.5,
         .silo => 1,
         .tower => 0.5,
@@ -258,10 +269,30 @@ pub fn missileAt(map: *const Map, t: Thing, s: f32) V3 {
     return .{ x, base + 4 * apex * s * (1 - s), z };
 }
 
-/// What a factory makes.
-pub const buildable = [_]Kind{ .walker, .tank, .flak, .builder, .drone, .fighter, .bomber, .air_builder };
+/// What a factory makes (on the ground), and a drone factory (flying).
+pub const buildable = [_]Kind{ .walker, .tank, .flak, .builder };
+pub const air_buildable = [_]Kind{ .drone, .fighter, .bomber, .air_builder };
+
+/// What factory kind `k` makes.
+pub fn makes(k: Kind) []const Kind {
+    return switch (k) {
+        .factory => &buildable,
+        .air_factory => &air_buildable,
+        else => &.{},
+    };
+}
+
+/// Armouring a building: what it costs (of what building it did), how
+/// long it takes, and how much of what hits it then hurts.
+pub const armour_share: f32 = 0.6;
+pub const armour_seconds: f32 = 12;
+pub const armoured_damage: f32 = 0.5;
+
+pub fn armourCost(k: Kind) f32 {
+    return k.cost().metal * armour_share;
+}
 /// What a builder builds.
-pub const constructible = [_]Kind{ .power, .battery, .mine, .tower, .factory, .silo };
+pub const constructible = [_]Kind{ .power, .battery, .mine, .tower, .factory, .air_factory, .silo };
 
 /// A builder's order: to build a `kind` at `at`, facing `yaw`.
 pub const Order = struct {
@@ -319,6 +350,13 @@ pub const Thing = struct {
     /// A building's: whether it has energy to run (short of it, some are
     /// shut down).
     powered: bool = true,
+    /// A building's: armoured (hurt less), or being (how far through).
+    armoured: bool = false,
+    armouring: bool = false,
+    armour_done: f32 = 0,
+    /// A unit sent with others: going no faster than the slowest of them
+    /// can (0: as fast as it can).
+    cap: f32 = 0,
     /// A missile's: where it was launched from (it is going to `rally`),
     /// how long its flight takes, and how long it has flown.
     launch: [2]f32 = .{ 0, 0 },
@@ -454,7 +492,8 @@ pub const World = struct {
     /// Asks factory `i` to make a `k`, if it has room in its line.
     pub fn enqueue(w: *World, i: usize, k: Kind) bool {
         const f = &w.things[i];
-        if (f.kind != .factory or f.queued == max_queue) return false;
+        if (!f.kind.isFactory() or f.queued == max_queue) return false;
+        if (std.mem.indexOfScalar(Kind, makes(f.kind), k) == null) return false;
         f.queue[f.queued] = k;
         f.queued += 1;
         return true;
@@ -497,6 +536,12 @@ pub const World = struct {
             widest = @max(widest, w.things[i].kind.radius());
         };
         const gap: f32 = @max(1.4, 2 * widest + 0.3);
+        // Together: as fast as the slowest of them can go.
+        var slowest: f32 = std.math.inf(f32);
+        for (which) |i| if (!w.things[i].kind.isBuilding()) {
+            slowest = @min(slowest, w.things[i].kind.speed());
+        };
+        const cap: f32 = if (n > 1) slowest else 0;
         // One way for each class (from the middle of those of it), shared.
         var ways: [2]?nav.Path = .{ null, null };
         for (std.enums.values(nav.Class)) |class| {
@@ -521,6 +566,7 @@ pub const World = struct {
             const slot = [2]f32{ x + (col - half) * gap, z + (row - half) * gap };
             k += 1;
             t.goal = slot;
+            t.cap = cap;
             t.replans = 0;
             t.path = .{};
             t.path_next = 0;
@@ -557,6 +603,27 @@ pub const World = struct {
             t.health = most;
             t.repairing = false;
         }
+    }
+
+    /// A building being armoured: paid for as it goes; done, armoured.
+    fn armour(w: *World, t: *Thing, dt: f32) void {
+        const part = dt / armour_seconds;
+        const r = &w.resources[t.team];
+        const cost = armourCost(t.kind) * part;
+        if (r.metal < cost) return;
+        r.metal -= cost;
+        t.armour_done += part;
+        if (t.armour_done < 1) return;
+        t.armoured = true;
+        t.armouring = false;
+    }
+
+    /// Armours building `i` (of `team`'s, built, not yet armoured); or, if
+    /// it is being, stops (what was paid kept: it goes on from there).
+    pub fn toggleArmour(w: *World, i: usize, team: u2) void {
+        const t = &w.things[i];
+        if (!t.kind.isBuilding() or t.team != team or t.built < 1 or t.armoured) return;
+        t.armouring = !t.armouring;
     }
 
     /// Repairs the buildings `which` (of `team`'s, damaged); if they all
@@ -662,6 +729,7 @@ pub const World = struct {
     pub fn send(w: *World, i: usize, to: [2]f32) void {
         const t = &w.things[i];
         t.goal = to;
+        t.cap = 0;
         t.replans = 0;
         w.route(t);
     }
@@ -686,6 +754,7 @@ pub const World = struct {
         for (w.all(), 0..) |*t, i| {
             if (t.built < 1) continue;
             if (t.repairing) w.repair(t, dt);
+            if (t.armouring) w.armour(t, dt);
             switch (t.kind) {
                 .walker, .tank, .drone, .flak => w.moveUnit(t, i, dt),
                 .bomber, .fighter => flight.step(w, t, dt),
@@ -694,7 +763,7 @@ pub const World = struct {
                     w.moveUnit(t, i, dt);
                 },
                 .tower => {},
-                .factory => w.make(t, dt),
+                .factory, .air_factory => w.make(t, dt),
                 .mine, .power => t.phase += dt * 2,
                 .silo => w.buildMissile(t, dt),
                 .battery => t.phase += dt,
@@ -855,6 +924,7 @@ pub const World = struct {
         };
         t.yaw = wrap(t.yaw + std.math.clamp(diff, -turn_rate * dt, turn_rate * dt));
         if ((k == .tank or k == .builder or k == .flak) and @abs(diff) > 0.6) want = 0;
+        if (t.cap > 0) want = @min(want, t.cap);
         t.moving += (want - t.moving) * @min(1, 4 * dt);
         var nx = t.pos[0] + @sin(t.yaw) * t.moving * dt;
         var nz = t.pos[2] - @cos(t.yaw) * t.moving * dt;
@@ -1033,7 +1103,8 @@ pub const World = struct {
         std.mem.copyForwards(Kind, f.queue[0 .. f.queued - 1], f.queue[1..f.queued]);
         f.queued -= 1;
         const fwd = V3{ @sin(f.yaw), 0, -@cos(f.yaw) };
-        const door = f.pos + fwd * math.splat(f.kind.radius() + 0.8);
+        // Out of the door; a drone factory's, up off its pad.
+        const door = if (f.kind == .air_factory) f.pos else f.pos + fwd * math.splat(f.kind.radius() + 0.8);
         if (w.add(.{ .kind = k, .team = f.team, .pos = door, .yaw = f.yaw })) |i| {
             // (`f` may have moved: the list is not resized, so it has not.)
             w.send(i, f.rally);
@@ -1342,4 +1413,69 @@ test "short of energy: just enough buildings shut down, which changing; all run 
     for (0..60 * 10) |_| w.step(1.0 / 60.0);
     try testing.expect(!w.resources[0].short);
     for (w.all()) |t| try testing.expect(t.powered);
+}
+
+test "armouring a building: paid for over a while; then it is hurt half as much" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    const b = map_mod.bases[0];
+    const i = w.add(.{ .kind = .mine, .team = 0, .pos = .{ b[0], 0, b[1] } }).?;
+    w.resources[0] = .{ .metal = 1000 };
+    w.toggleArmour(i, 0);
+    try testing.expect(w.things[i].armouring);
+    for (0..@as(usize, @intFromFloat(armour_seconds)) * 10 + 5) |_| w.step(0.1);
+    try testing.expect(w.things[i].armoured and !w.things[i].armouring);
+    // (The mine dug some metal meanwhile: 4 a second.)
+    try testing.expectApproxEqAbs(1000 - armourCost(.mine) + 4 * (armour_seconds + 0.5), w.resources[0].metal, 4);
+    // Hurt by a shell's burst: half.
+    const plain = w.add(.{ .kind = .mine, .team = 0, .pos = .{ b[0] + 8, 0, b[1] } }).?;
+    for ([_]usize{ i, plain }) |k| w.addShot(.{ .from = w.things[k].pos + V3{ 0, 5, 0 }, .to = w.things[k].pos, .rate = 100, .shell = true, .team = 1, .damage = .{ 0, 0, 40, 0 } });
+    w.step(0.05);
+    const most = combat.maxHealth(.mine);
+    try testing.expectApproxEqAbs(most - w.things[plain].health, 2 * (most - w.things[i].health), 0.01);
+}
+
+test "a drone factory makes what flies (and not what goes on the ground)" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    const b = map_mod.bases[0];
+    const f = w.add(.{ .kind = .air_factory, .team = 0, .pos = .{ b[0], 0, b[1] }, .rally = .{ b[0] + 6, b[1] } }).?;
+    _ = w.add(.{ .kind = .power, .team = 0, .pos = .{ b[0] - 8, 0, b[1] } }).?;
+    try testing.expect(!w.enqueue(f, .tank));
+    try testing.expect(w.enqueue(f, .drone));
+    for (0..80) |_| w.step(0.1);
+    var drones: usize = 0;
+    for (w.all()) |t| if (t.kind == .drone) {
+        drones += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), drones);
+}
+
+test "sent together, units go as fast as the slowest of them; alone, as fast as each can" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    const c = map_mod.centre;
+    const walker = w.add(.{ .kind = .walker, .team = 0, .pos = .{ c[0], 0, c[1] } }).?;
+    const tank = w.add(.{ .kind = .tank, .team = 0, .pos = .{ c[0], 0, c[1] + 3 } }).?;
+    w.moveTo(&.{ walker, tank }, c[0] + 30, c[1]);
+    var fastest: f32 = 0;
+    for (0..60 * 4) |_| {
+        w.step(1.0 / 60.0);
+        fastest = @max(fastest, w.things[walker].moving);
+    }
+    try testing.expect(fastest <= Kind.tank.speed() + 1e-3);
+    // Alone: as fast as a walker goes.
+    w.moveTo(&.{walker}, c[0] - 30, c[1]);
+    fastest = 0;
+    for (0..60 * 4) |_| {
+        w.step(1.0 / 60.0);
+        fastest = @max(fastest, w.things[walker].moving);
+    }
+    try testing.expect(fastest > Kind.tank.speed() + 0.5);
 }

@@ -41,6 +41,7 @@ pub fn maxHealth(k: Kind) f32 {
         .flak => 180,
         .tower => 450,
         .factory => 1200,
+        .air_factory => 1000,
         .power, .mine => 350,
         .silo => 900,
         .battery => 300,
@@ -346,7 +347,7 @@ fn fire(w: *World, t: *Thing, slot: usize, wp: Weapon, j: usize) void {
     const hits = hash(salt) < (if (o.kind == .missile) @as(f32, 0.25) else 0.85);
     var to = middle(o);
     if (hits) {
-        w.things[j].health -= wp.damage[@intFromEnum(armourOf(o.kind))];
+        hurt(&w.things[j], wp.damage[@intFromEnum(armourOf(o.kind))]);
     } else {
         to += V3{ hash(salt +% 1) - 0.5, hash(salt +% 2) * 0.6, hash(salt +% 3) - 0.5 };
     }
@@ -363,7 +364,7 @@ fn burst(w: *World, s: Shot) void {
         const d = @sqrt(flat2(t.pos, s.to));
         if (d > reach) continue;
         const k = 1 - 0.6 * d / reach;
-        t.health -= s.damage[@intFromEnum(armourOf(t.kind))] * k;
+        hurt(t, s.damage[@intFromEnum(armourOf(t.kind))] * k);
     }
 }
 
@@ -386,8 +387,13 @@ pub fn missileBurst(w: *World, team: u2, at: V3) void {
         if (d > reach) continue;
         var amount = missile_damage * (1 - 0.6 * d / reach);
         if (t.kind == .tower) amount *= tower_hardened;
-        t.health -= amount;
+        hurt(t, amount);
     }
+}
+
+/// `t` takes `amount` (less, armoured).
+fn hurt(t: *Thing, amount: f32) void {
+    t.health -= if (t.armoured) amount * units.armoured_damage else amount;
 }
 
 fn hash(v: u32) f32 {
