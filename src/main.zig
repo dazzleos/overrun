@@ -100,7 +100,12 @@ const Scene = struct {
             const len = math.length(way);
             const tail_len = @min(if (shot.shell) @as(f32, 0.9) else 2.4, len * shot.at);
             const tail = head - way * math.splat(tail_len / @max(len, 0.01));
-            if (shot.shell) {
+            if (shot.fall > 0) {
+                // A bomb: short, dark, along its fall.
+                var before = shot;
+                before.at = @max(0, shot.at - 0.06);
+                models.streak(&b, before.head(), head, per_pixel * 5, fwd, .{ 0.16, 0.16, 0.18 });
+            } else if (shot.shell) {
                 models.streak(&b, tail, head, per_pixel * 4, fwd, .{ 2.4, 1.9, 1.2 });
             } else {
                 models.streak(&b, tail, head, per_pixel * 2, fwd, .{ 2.0, 1.7, 0.8 });
@@ -235,6 +240,7 @@ test {
     _ = @import("fog.zig");
     _ = @import("nav.zig");
     _ = @import("combat.zig");
+    _ = @import("flight.zig");
     _ = @import("units.zig");
     _ = @import("models.zig");
     _ = @import("renderer.zig");

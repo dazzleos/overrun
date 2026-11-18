@@ -516,9 +516,12 @@ pub const Game = struct {
                 g.sent = .{ .at = t.pos, .time = g.world.time };
                 return;
             }
-            // Another player's: units chosen go to it.
+            // Another player's: units chosen go after it.
             if (t.team != me) {
-                if (g.hasUnitsChosen()) g.sendTo(t.pos);
+                if (g.hasUnitsChosen()) {
+                    g.world.orderAttack(g.chosen.items, i);
+                    g.sent = .{ .at = t.pos, .time = g.world.time };
+                }
                 return;
             }
             if (g.shift) {

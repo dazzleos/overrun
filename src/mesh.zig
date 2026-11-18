@@ -76,6 +76,13 @@ pub const Frame = struct {
         return .{ .right = f.right, .up = f.up * math.splat(c) + f.back * math.splat(s), .back = f.back * math.splat(c) - f.up * math.splat(s) };
     }
 
+    /// Rolled `a` about its back (its right side down).
+    pub fn rolled(f: Frame, a: f32) Frame {
+        const c = @cos(a);
+        const s = @sin(a);
+        return .{ .right = f.right * math.splat(c) - f.up * math.splat(s), .up = f.up * math.splat(c) + f.right * math.splat(s), .back = f.back };
+    }
+
     /// Where `local` (right, up, back from `origin`) is.
     pub fn at(f: Frame, origin: V3, local: V3) V3 {
         return origin + f.right * math.splat(local[0]) + f.up * math.splat(local[1]) + f.back * math.splat(local[2]);

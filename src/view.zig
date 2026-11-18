@@ -133,13 +133,16 @@ fn chosenPanel(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
     return cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(10), .child = cx.make(kete.Padding{ .padding = .{ .left = 14, .top = 8, .right = 14, .bottom = 8 }, .child = label(cx, text, 16) }) });
 }
 
-/// A panel of cells, under a title.
+/// A panel of cells, under a title: four to a row.
 fn panel(cx: *kete.BuildContext, title: []const u8, cells: []const kete.Widget) kete.Widget {
     const a = cx.arena;
-    return cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(12), .child = cx.make(kete.Padding{ .padding = .all(10), .child = cx.make(kete.Column{ .fill = false, .spacing = 8, .children = a.dupe(kete.Widget, &.{
-        label(cx, title, 14),
-        cx.make(kete.Row{ .fill = false, .spacing = 8, .children = cells }),
-    }) catch &.{} }) }) });
+    var rows: std.ArrayList(kete.Widget) = .empty;
+    rows.append(a, label(cx, title, 14)) catch {};
+    var i: usize = 0;
+    while (i < cells.len) : (i += 4) {
+        rows.append(a, cx.make(kete.Row{ .fill = false, .spacing = 8, .children = cells[i..@min(i + 4, cells.len)] })) catch {};
+    }
+    return cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(12), .child = cx.make(kete.Padding{ .padding = .all(10), .child = cx.make(kete.Column{ .fill = false, .spacing = 8, .children = rows.items }) }) });
 }
 
 /// A kind to make or build: its icon, name and cost, and a note; `on`
@@ -170,7 +173,7 @@ fn kindCell(cx: *kete.BuildContext, k: Kind, on: bool, active: bool, note: []con
 
 // The icons chosen at run time (`iconOf`, and the window buttons').
 comptime {
-    _ = &[_]kete.IconName{ .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
+    _ = &[_]kete.IconName{ .local_airport, .airplanemode_active, .radar, .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
 }
 
 fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {
@@ -180,6 +183,9 @@ fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {
         .drone => .flight,
         .builder => .front_loader,
         .air_builder => .flight_takeoff,
+        .bomber => .local_airport,
+        .fighter => .airplanemode_active,
+        .flak => .radar,
         .power => .bolt,
         .mine => .diamond,
         .tower => .security,

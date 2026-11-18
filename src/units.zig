@@ -7,6 +7,7 @@ const math = @import("math.zig");
 const map_mod = @import("map.zig");
 const nav = @import("nav.zig");
 const combat = @import("combat.zig");
+const flight = @import("flight.zig");
 
 const V3 = math.V3;
 const Map = map_mod.Map;
@@ -24,6 +25,14 @@ pub const Kind = enum(u8) {
     /// A large drone that builds buildings, flying to them over trees and
     /// water.
     air_builder,
+    /// Winged, on two tilting rotors: hovers; flies fast, in runs over
+    /// what is on the ground, three bombs a run.
+    bomber,
+    /// Like the bomber, smaller: goes after what flies, its gun firing the
+    /// way it flies.
+    fighter,
+    /// On tracks, four guns pointing up: shoots at what flies.
+    flak,
     /// Guards the base: a gun on a column.
     tower,
     /// Makes units (see `Thing.queue`).
@@ -38,19 +47,34 @@ pub const Kind = enum(u8) {
     }
 
     pub fn flies(k: Kind) bool {
-        return k == .drone or k == .air_builder;
+        return k == .drone or k == .air_builder or k == .bomber or k == .fighter;
+    }
+
+    /// Whether it flies on wings (see `World.fly`): hovering, or tilted
+    /// forward, flying fast.
+    pub fn winged(k: Kind) bool {
+        return k == .bomber or k == .fighter;
+    }
+
+    /// How high over the ground (or water) it flies.
+    pub fn altitude(k: Kind) f32 {
+        return switch (k) {
+            .bomber => 5.5,
+            .fighter => 4.5,
+            else => 3,
+        };
     }
 
     /// Whether trees are in its way (those on tracks and wheels are too
     /// big to go between them; walkers and fliers are not).
     pub fn blockedByTrees(k: Kind) bool {
-        return k == .tank or k == .builder;
+        return k == .tank or k == .builder or k == .flak;
     }
 
     /// How much bigger than its model is drawn (see models.zig).
     pub fn scale(k: Kind) f32 {
         return switch (k) {
-            .tank, .builder => 1.4,
+            .tank, .builder, .flak => 1.4,
             .air_builder => 1.3,
             else => 1,
         };
@@ -60,7 +84,7 @@ pub const Kind = enum(u8) {
     pub fn navClass(k: Kind) ?nav.Class {
         return switch (k) {
             .walker => .foot,
-            .tank, .builder => .wheels,
+            .tank, .builder, .flak => .wheels,
             else => null,
         };
     }
@@ -77,6 +101,9 @@ pub const Kind = enum(u8) {
             .drone => "Drone",
             .builder => "Builder",
             .air_builder => "Air builder",
+            .bomber => "Bomber",
+            .fighter => "Fighter",
+            .flak => "AA tank",
             .tower => "Tower",
             .factory => "Factory",
             .power => "Power plant",
@@ -100,6 +127,9 @@ pub const Kind = enum(u8) {
             .drone => 4.5,
             .builder => 1.8,
             .air_builder => 3.0,
+            .bomber => 9,
+            .fighter => 12,
+            .flak => 2.0,
             else => 0,
         };
     }
@@ -112,6 +142,9 @@ pub const Kind = enum(u8) {
             .drone => 0.5,
             .builder => 0.84,
             .air_builder => 0.85,
+            .bomber => 1.0,
+            .fighter => 0.7,
+            .flak => 0.84,
             .tower => 0.8,
             .factory => 2.2,
             .power => 1.4,
@@ -127,6 +160,9 @@ pub const Kind = enum(u8) {
             .drone => 0.5,
             .builder => 1.1,
             .air_builder => 0.8,
+            .bomber => 0.6,
+            .fighter => 0.45,
+            .flak => 1.1,
             .tower => 2.4,
             .factory => 2.2,
             .power => 2.0,
@@ -142,6 +178,9 @@ pub const Kind = enum(u8) {
             .drone => .{ .metal = 60, .energy = 70, .seconds = 6 },
             .builder => .{ .metal = 110, .energy = 60, .seconds = 8 },
             .air_builder => .{ .metal = 150, .energy = 150, .seconds = 11 },
+            .bomber => .{ .metal = 180, .energy = 160, .seconds = 12 },
+            .fighter => .{ .metal = 110, .energy = 120, .seconds = 8 },
+            .flak => .{ .metal = 120, .energy = 60, .seconds = 8 },
             .tower => .{ .metal = 120, .energy = 60, .seconds = 12 },
             .factory => .{ .metal = 320, .energy = 160, .seconds = 25 },
             .power => .{ .metal = 70, .energy = 20, .seconds = 8 },
@@ -153,7 +192,7 @@ pub const Kind = enum(u8) {
 pub const Cost = struct { metal: f32, energy: f32, seconds: f32 };
 
 /// What a factory makes.
-pub const buildable = [_]Kind{ .walker, .tank, .drone, .builder, .air_builder };
+pub const buildable = [_]Kind{ .walker, .tank, .flak, .builder, .drone, .fighter, .bomber, .air_builder };
 /// What a builder builds.
 pub const constructible = [_]Kind{ .power, .mine, .tower, .factory };
 
@@ -194,6 +233,17 @@ pub const Thing = struct {
     cool: [2]f32 = .{ 0, 0 },
     look: f32 = 0,
     barrel: bool = false,
+    /// What it was told to attack (bombers and fighters go after it).
+    attack: ?u16 = null,
+    /// Winged: how far tilted forward (0, hovering, to 1, flying fast),
+    /// and banked (turning); a bomber's bombs left this run, and how long
+    /// until the next can drop (or, all dropped, until it turns back).
+    tilt: f32 = 0,
+    bank: f32 = 0,
+    bombs: u8 = 3,
+    run_time: f32 = 0,
+    /// Shots fired (an AA tank's next barrel).
+    gun: u8 = 0,
     /// How fast it is going now (it speeds up and slows down).
     moving: f32 = 0,
     /// Its legs', rotors' or drill's turn, for drawing them.
@@ -280,7 +330,7 @@ pub const World = struct {
 
     /// Where `k` is (up and down) at (x, z): on the ground, or flying.
     pub fn groundFor(w: *const World, k: Kind, x: f32, z: f32) f32 {
-        return if (k.flies()) w.map.surfaceAt(x, z) + 3 else w.map.heightAt(x, z);
+        return if (k.flies()) w.map.surfaceAt(x, z) + k.altitude() else w.map.heightAt(x, z);
     }
 
     /// Player `team`'s base: a factory, a power plant, a mine and a tower,
@@ -340,6 +390,7 @@ pub const World = struct {
         for (which) |i| {
             w.things[i].order = null;
             w.things[i].site = null;
+            w.things[i].attack = null;
         }
         var n: usize = 0;
         for (which) |i| {
@@ -401,6 +452,33 @@ pub const World = struct {
         }
     }
 
+    /// Tells the units `which` to attack thing `j`: those that can, go
+    /// after it (on the ground, sent to it; winged, flying at it).
+    pub fn orderAttack(w: *World, which: []const usize, j: usize) void {
+        const at = w.things[j].pos;
+        var ground: [max_things]usize = undefined;
+        var n: usize = 0;
+        for (which) |i| {
+            const t = w.things[i];
+            if (t.kind.isBuilding() or t.kind.builds()) continue;
+            if (!t.kind.winged()) {
+                ground[n] = i;
+                n += 1;
+            }
+        }
+        w.moveTo(ground[0..n], at[0], at[2]);
+        for (which) |i| {
+            const t = &w.things[i];
+            if (t.kind.isBuilding() or t.kind.builds()) continue;
+            const can = for (combat.weaponsOf(t.kind)) |maybe| {
+                if (maybe) |wp| if (wp.canHit(w.things[j].kind)) break true;
+            } else false;
+            if (!can) continue;
+            t.attack = @intCast(j);
+            if (t.kind.winged()) t.goal = null;
+        }
+    }
+
     /// Sends unit `i` to `to`, finding its way.
     pub fn send(w: *World, i: usize, to: [2]f32) void {
         const t = &w.things[i];
@@ -428,7 +506,8 @@ pub const World = struct {
         for (w.all(), 0..) |*t, i| {
             if (t.built < 1) continue;
             switch (t.kind) {
-                .walker, .tank, .drone => w.moveUnit(t, i, dt),
+                .walker, .tank, .drone, .flak => w.moveUnit(t, i, dt),
+                .bomber, .fighter => flight.step(w, t, dt),
                 .builder, .air_builder => {
                     w.construct(t, dt);
                     w.moveUnit(t, i, dt);
@@ -473,6 +552,7 @@ pub const World = struct {
                     .light => 0.8,
                     .vehicle => 1.5,
                     .building => 2.6,
+                    .air => 1.4,
                 } });
                 if (t.kind.isBuilding()) w.map.nav.building(t.pos[0], t.pos[2], t.kind.radius(), false);
                 continue;
@@ -485,6 +565,7 @@ pub const World = struct {
         w.removed_any = true;
         for (w.things[0..w.count]) |*t| {
             for (&t.targets) |*target| target.* = if (target.*) |j| w.moved_to[j] else null;
+            t.attack = if (t.attack) |j| w.moved_to[j] else null;
             if (t.site) |s| {
                 if (w.moved_to[s]) |ns| t.site = ns else {
                     // What it was building is gone.
@@ -528,12 +609,12 @@ pub const World = struct {
         // go; walkers and drones turn as they go.
         const diff = angleDiff(heading, t.yaw);
         const turn_rate: f32 = switch (k) {
-            .tank, .builder => 2.2,
+            .tank, .builder, .flak => 2.2,
             .walker => 6,
             else => 5,
         };
         t.yaw = wrap(t.yaw + std.math.clamp(diff, -turn_rate * dt, turn_rate * dt));
-        if ((k == .tank or k == .builder) and @abs(diff) > 0.6) want = 0;
+        if ((k == .tank or k == .builder or k == .flak) and @abs(diff) > 0.6) want = 0;
         t.moving += (want - t.moving) * @min(1, 4 * dt);
         var nx = t.pos[0] + @sin(t.yaw) * t.moving * dt;
         var nz = t.pos[2] - @cos(t.yaw) * t.moving * dt;
@@ -575,7 +656,7 @@ pub const World = struct {
         t.pos[1] += (ground - t.pos[1]) * @min(1, (if (k.flies()) @as(f32, 3) else 20) * dt);
         t.phase += dt * switch (k) {
             .walker => t.moving * 3.2,
-            .tank, .builder => t.moving * 2,
+            .tank, .builder, .flak => t.moving * 2,
             else => 30,
         };
     }
