@@ -207,6 +207,11 @@ pub const Kind = enum(u8) {
 
 pub const Cost = struct { metal: f32, energy: f32, seconds: f32 };
 
+/// Repairing: how much of its health a building gets back a second, and
+/// the metal each point costs (a factory, from nothing: 300).
+pub const repair_rate: f32 = 0.04;
+pub const repair_metal: f32 = 0.25;
+
 /// A missile's flight: a few seconds to climb and dive, and its speed
 /// across the map.
 const missile_seconds: f32 = 6;
@@ -283,6 +288,8 @@ pub const Thing = struct {
     /// A silo's: whether its missile is ready (`progress` how far it is
     /// built, while `queued`).
     armed: bool = false,
+    /// A building's: being repaired (healing, paid for in metal).
+    repairing: bool = false,
     /// A missile's: where it was launched from (it is going to `rally`),
     /// how long its flight takes, and how long it has flown.
     launch: [2]f32 = .{ 0, 0 },
@@ -496,6 +503,41 @@ pub const World = struct {
         }
     }
 
+    /// A building being repaired: healing a little each second, paying
+    /// metal for it; done when whole (waiting, when there is no metal).
+    fn repair(w: *World, t: *Thing, dt: f32) void {
+        const most = combat.maxHealth(t.kind);
+        const r = &w.resources[t.team];
+        const want = @min(most - t.health, most * repair_rate * dt);
+        const can = @min(want, r.metal / repair_metal);
+        t.health += can;
+        r.metal -= can * repair_metal;
+        if (t.health >= most - 0.01) {
+            t.health = most;
+            t.repairing = false;
+        }
+    }
+
+    /// Repairs the buildings `which` (of `team`'s, damaged); if they all
+    /// are being, stops.
+    pub fn toggleRepair(w: *World, which: []const usize, team: u2) void {
+        var every = true;
+        var any = false;
+        for (which) |i| {
+            const t = w.things[i];
+            if (!t.kind.isBuilding() or t.team != team or t.built < 1) continue;
+            if (t.health >= combat.maxHealth(t.kind) and !t.repairing) continue;
+            any = true;
+            if (!t.repairing) every = false;
+        }
+        if (!any) return;
+        for (which) |i| {
+            const t = &w.things[i];
+            if (!t.kind.isBuilding() or t.team != team or t.built < 1) continue;
+            t.repairing = !every and t.health < combat.maxHealth(t.kind);
+        }
+    }
+
     /// A silo told to: builds its missile, paying for it as it goes.
     fn buildMissile(w: *World, t: *Thing, dt: f32) void {
         t.phase += dt;
@@ -601,6 +643,7 @@ pub const World = struct {
         w.time += dt;
         for (w.all(), 0..) |*t, i| {
             if (t.built < 1) continue;
+            if (t.repairing) w.repair(t, dt);
             switch (t.kind) {
                 .walker, .tank, .drone, .flak => w.moveUnit(t, i, dt),
                 .bomber, .fighter => flight.step(w, t, dt),
@@ -1088,4 +1131,37 @@ test "sent past a forest, a tank finds its way round it and gets there" {
         const p = w.things[i].pos;
         try testing.expect(@abs(p[0] - to[0]) < 1 and @abs(p[2] - to[1]) < 1);
     }
+}
+
+test "repairing: a damaged building heals, paying metal; it stops when whole, and waits for metal" {
+    const tw = try testWorld();
+    defer tw.map.destroy(testing.allocator);
+    defer testing.allocator.destroy(tw.world);
+    const w = tw.world;
+    const b = map_mod.bases[0];
+    const f = w.add(.{ .kind = .tower, .team = 0, .pos = .{ b[0], 0, b[1] } }).?;
+    const most = combat.maxHealth(.tower);
+    w.things[f].health = most / 2;
+    w.resources[0] = .{ .metal = 1000, .energy = 1000 };
+    w.toggleRepair(&.{f}, 0);
+    try testing.expect(w.things[f].repairing);
+    for (0..60 * 5) |_| w.step(1.0 / 60.0);
+    // Healed some, for metal.
+    const healed = w.things[f].health - most / 2;
+    try testing.expect(healed > 0);
+    try testing.expectApproxEqAbs(1000 - healed * repair_metal, w.resources[0].metal, 1);
+    // Pressed again: stops.
+    w.toggleRepair(&.{f}, 0);
+    try testing.expect(!w.things[f].repairing);
+    // No metal: waits, healing nothing.
+    w.toggleRepair(&.{f}, 0);
+    w.resources[0].metal = 0;
+    const was = w.things[f].health;
+    for (0..60) |_| w.step(1.0 / 60.0);
+    try testing.expectEqual(was, w.things[f].health);
+    // Metal again: whole, then stops.
+    w.resources[0].metal = 1000;
+    for (0..60 * 30) |_| w.step(1.0 / 60.0);
+    try testing.expectEqual(most, w.things[f].health);
+    try testing.expect(!w.things[f].repairing);
 }

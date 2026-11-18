@@ -115,6 +115,7 @@ fn chosenPanel(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
             const note = if (n == 0) "" else if (making) cx.fmt("{d} queued, {d:.0}%", .{ n, f.progress * 100 }) else cx.fmt("{d} queued", .{n});
             cells.append(a, kindCell(cx, k, n > 0, making, note, .of(q, Queue.add))) catch {};
         }
+        if (repairCell(cx, g)) |r| cells.append(a, r) catch {};
         return panel(cx, "Factory: click to queue, right-click to take one out", cells.items);
     }
     if (g.chosenSilo()) |si| {
@@ -122,8 +123,10 @@ fn chosenPanel(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
         const q = a.create(SiloButton) catch return null;
         q.* = .{ .game = g };
         const note = if (g.targeting != null) "Aiming" else if (s.armed) "Ready: click to aim" else if (s.queued > 0) cx.fmt("Building, {d:.0}%", .{s.progress * 100}) else "Click to build";
-        const cells = a.dupe(kete.Widget, &.{kindCell(cx, .missile, s.armed or s.queued > 0, g.targeting != null, note, .of(q, SiloButton.press))}) catch return null;
-        return panel(cx, if (g.targeting != null) "Click where to send it (here, or on the minimap); right-click to stop" else "Missile silo: one missile at a time", cells);
+        var cells: std.ArrayList(kete.Widget) = .empty;
+        cells.append(a, kindCell(cx, .missile, s.armed or s.queued > 0, g.targeting != null, note, .of(q, SiloButton.press))) catch {};
+        if (repairCell(cx, g)) |r| cells.append(a, r) catch {};
+        return panel(cx, if (g.targeting != null) "Click where to send it (here, or on the minimap); right-click to stop" else "Missile silo: one missile at a time", cells.items);
     }
     if (g.buildersChosen()) {
         var cells: std.ArrayList(kete.Widget) = .empty;
@@ -138,8 +141,28 @@ fn chosenPanel(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
     if (g.chosen.items.len == 0) return null;
     const t = g.world.things[g.chosen.items[0]];
     const text = if (g.chosen.items.len == 1) t.kind.name() else cx.fmt("{d} chosen", .{g.chosen.items.len});
+    if (repairCell(cx, g)) |r| return panel(cx, text, a.dupe(kete.Widget, &.{r}) catch return null);
     return cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(10), .child = cx.make(kete.Padding{ .padding = .{ .left = 14, .top = 8, .right = 14, .bottom = 8 }, .child = label(cx, text, 16) }) });
 }
+
+/// The chosen buildings' repair button, if any are damaged: what the
+/// rest of it would cost, or (repairing) that it is.
+fn repairCell(cx: *kete.BuildContext, g: *Game) ?kete.Widget {
+    const r = g.repairable();
+    if (!r.any) return null;
+    const a = cx.arena;
+    const q = a.create(RepairButton) catch return null;
+    q.* = .{ .game = g };
+    return actionCell(cx, .build, "Repair", if (r.repairing) "Repairing" else cx.fmt("{d:.0} metal", .{r.metal}), r.repairing, r.repairing, .of(q, RepairButton.press));
+}
+
+const RepairButton = struct {
+    game: *Game,
+
+    fn press(q: *RepairButton) void {
+        q.game.toggleRepair();
+    }
+};
 
 /// A panel of cells, under a title: four to a row.
 fn panel(cx: *kete.BuildContext, title: []const u8, cells: []const kete.Widget) kete.Widget {
@@ -151,6 +174,24 @@ fn panel(cx: *kete.BuildContext, title: []const u8, cells: []const kete.Widget) 
         rows.append(a, cx.make(kete.Row{ .fill = false, .spacing = 8, .children = cells[i..@min(i + 4, cells.len)] })) catch {};
     }
     return cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(12), .child = cx.make(kete.Padding{ .padding = .all(10), .child = cx.make(kete.Column{ .fill = false, .spacing = 8, .children = rows.items }) }) });
+}
+
+/// A button cell: an icon, a title and a note.
+fn actionCell(cx: *kete.BuildContext, icon: @FieldType(kete.Icon, "icon"), title: []const u8, note: []const u8, on: bool, active: bool, press: kete.Callback) kete.Widget {
+    const a = cx.arena;
+    return cx.make(kete.Pressable{ .on_press = press, .child = cx.make(kete.RoundedBox{
+        .color = gfx.Color.argb(if (on) 0xcc303848 else 0x99000000),
+        .border_width = if (active) 2 else 1,
+        .border_color = gfx.Color.argb(if (active) 0xffffd25a else 0x66ffffff),
+        .radius = .all(8),
+        .child = cx.make(kete.SizedBox{ .width = 104, .child = cx.make(kete.Padding{ .padding = .all(7), .child = cx.make(kete.Column{ .fill = false, .spacing = 2, .cross_axis_alignment = .start, .children = a.dupe(kete.Widget, &.{
+            cx.make(kete.Row{ .fill = false, .spacing = 4, .children = a.dupe(kete.Widget, &.{
+                cx.make(kete.Icon{ .icon = icon, .size = 18, .color = gfx.Color.argb(0xffffffff) }),
+                label(cx, title, 13),
+            }) catch &.{} }),
+            label(cx, note, 12),
+        }) catch &.{} }) }) }),
+    }) });
 }
 
 /// A kind to make or build: its icon, name and cost, and a note; `on`
@@ -181,7 +222,7 @@ fn kindCell(cx: *kete.BuildContext, k: Kind, on: bool, active: bool, note: []con
 
 // The icons chosen at run time (`iconOf`, and the window buttons').
 comptime {
-    _ = &[_]kete.IconName{ .rocket, .rocket_launch, .my_location, .local_airport, .airplanemode_active, .radar, .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
+    _ = &[_]kete.IconName{ .build, .rocket, .rocket_launch, .my_location, .local_airport, .airplanemode_active, .radar, .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
 }
 
 fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {

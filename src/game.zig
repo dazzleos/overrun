@@ -14,6 +14,7 @@ const std = @import("std");
 const kete = @import("kete");
 const minimap_mod = @import("minimap.zig");
 const fog_mod = @import("fog.zig");
+const combat = @import("combat.zig");
 const math = @import("math.zig");
 const map_mod = @import("map.zig");
 const units = @import("units.zig");
@@ -443,6 +444,29 @@ pub const Game = struct {
         g.world.launchMissile(s, at);
         g.targeting = null;
         g.sent = .{ .at = .{ at[0], g.map.surfaceAt(at[0], at[1]), at[1] }, .time = g.world.time };
+    }
+
+    /// This player's buildings chosen that are damaged (or being
+    /// repaired), and whether all those are being repaired.
+    pub fn repairable(g: *const Game) struct { any: bool, repairing: bool, metal: f32 } {
+        var any = false;
+        var all = true;
+        var metal: f32 = 0;
+        for (g.chosen.items) |i| {
+            const t = g.world.things[i];
+            if (!t.kind.isBuilding() or t.team != me or t.built < 1) continue;
+            const most = combat.maxHealth(t.kind);
+            if (t.health >= most and !t.repairing) continue;
+            any = true;
+            if (!t.repairing) all = false;
+            metal += (most - t.health) * units.repair_metal;
+        }
+        return .{ .any = any, .repairing = any and all, .metal = metal };
+    }
+
+    /// The chosen buildings repaired (or, all being, not).
+    pub fn toggleRepair(g: *Game) void {
+        g.world.toggleRepair(g.chosen.items, me);
     }
 
     /// Whether any builders are chosen.
