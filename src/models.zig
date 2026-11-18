@@ -120,12 +120,13 @@ fn airBuilder(b: *Builder, f_in: Frame, p: V3, t: *const Thing, team: mesh.Rgb) 
     shadow(b, .{ p[0], p[1] - 3 + 0.04, p[2] }, 0.6 * t.kind.scale());
 }
 
-/// A bomber or a fighter: a body, wings, and a rotor at each wingtip,
-/// turning from up (hovering) to forward (flying) as it tilts; the whole
-/// tilting forward a little as it flies, and banking as it turns.
+/// A bomber or a fighter: a body, wings, and a propeller at each
+/// wingtip facing forward, as a plane's. Hovering, it stands on its tail,
+/// nose up (its propellers lifting it); flying, it tilts forward until
+/// level; banking as it turns.
 fn aircraft(b: *Builder, f_in: Frame, p: V3, t: *const Thing, team: mesh.Rgb, k: units.Kind) void {
     const big = k == .bomber;
-    const f = f_in.tipped(-0.3 * t.tilt).rolled(t.bank * 0.7);
+    const f = f_in.rolled(t.bank * 0.7).tipped((1 - t.tilt) * std.math.pi / 2 * 0.95);
     const len: f32 = if (big) 0.75 else 0.55;
     const span: f32 = if (big) 1.25 else 0.85;
     b.box(f, p, .{ 0.2, 0.14, len }, .{ 0.8, 0.85 }, if (big) rgb(0x5d6670) else metal);
@@ -139,8 +140,8 @@ fn aircraft(b: *Builder, f_in: Frame, p: V3, t: *const Thing, team: mesh.Rgb, k:
     } else {
         b.box(f, f.at(p, .{ 0, -0.02, -len - 0.15 }), .{ 0.025, 0.025, 0.15 }, .{ 1, 1 }, black);
     }
-    // A rotor at each wingtip: up hovering, forward flying.
-    const rotor = f.tipped(-t.tilt * std.math.pi / 2 * 0.95);
+    // A propeller at each wingtip, facing forward.
+    const rotor = f.tipped(-std.math.pi / 2.0);
     for ([2]f32{ -1, 1 }) |side| {
         const tip = f.at(p, .{ side * span, 0.02, 0 });
         b.box(rotor, rotor.at(tip, .{ 0, 0.06, 0 }), .{ 0.07, 0.12, 0.07 }, .{ 1, 1 }, dark);
