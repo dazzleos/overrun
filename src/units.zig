@@ -188,8 +188,7 @@ pub const World = struct {
     pub fn addBase(w: *World, team: u2) void {
         const b = map_mod.bases[team];
         // Towards the middle of the map.
-        const mid: f32 = map_mod.size / 2;
-        const out = math.normalize(.{ mid - b[0], 0, mid - b[1] });
+        const out = math.normalize(.{ map_mod.centre[0] - b[0], 0, map_mod.centre[1] - b[1] });
         const side = V3{ -out[2], 0, out[0] };
         const at = struct {
             fn f(base: [2]f32, o: V3, s: V3, fwd: f32, across: f32) V3 {
@@ -315,9 +314,10 @@ pub const World = struct {
             nx += dx / d * push;
             nz += dz / d * push;
         }
-        if (k.flies() or w.map.passable(nx, nz)) {
-            t.pos[0] = std.math.clamp(nx, 0.5, map_mod.size - 0.5);
-            t.pos[2] = std.math.clamp(nz, 0.5, map_mod.size - 0.5);
+        // Flying, anywhere over the map; on the ground, where it can go.
+        if (if (k.flies()) map_mod.inside(nx, nz) > 0.5 else w.map.passable(nx, nz)) {
+            t.pos[0] = nx;
+            t.pos[2] = nz;
         } else {
             // Blocked (water, a cliff): it stops.
             t.moving = 0;

@@ -3,7 +3,11 @@
 //! √3/2 apart), each at its own height, and between each three of them a
 //! triangle (equilateral, seen from above: six round each corner, a
 //! hexagon), so the ground has hills, ridges and valleys (with water in
-//! the lowest) and no grid's diagonals; and its triangles to draw, lit and
+//! the lowest) and no grid's diagonals. The map that can be played on is a
+//! hexagon of them (its edges along the rows, and the lattice's other two
+//! ways), nearly round; the ground goes on past it (to the edge of the
+//! view, however it looks), dimmed, and nothing can go there. And its
+//! triangles to draw, lit and
 //! coloured by height and slope, in chunks (those out of view are not
 //! drawn).
 
@@ -14,14 +18,18 @@ const mesh = @import("mesh.zig");
 const V3 = math.V3;
 const Vertex = mesh.Vertex;
 
-/// Blocks across and down (the map is `size` blocks square).
+/// Blocks across the hexagon that can be played on, east to west.
 pub const size = 96;
 /// How far apart the rows of corners are.
 pub const row_gap: f32 = 0.8660254;
-/// Corners in a row (the last of the odd rows half a block past the
-/// map), and rows (enough to reach `size` down).
-pub const cols = size + 1;
-pub const rows = 112 + 1;
+/// Corners, and rows of them, past the hexagon's square each way (the
+/// ground seen past its edge, to the edge of the view).
+pub const margin_cols = 48;
+pub const margin_rows = 56;
+/// Corners in a row, and rows: the hexagon's square (`size` across, 112
+/// rows down), and the margins.
+pub const cols = size + 2 * margin_cols + 1;
+pub const rows = 112 + 2 * margin_rows + 1;
 /// The water's height: ground below it is under water (units on the
 /// ground cannot go there).
 pub const water_level: f32 = 0.6;
@@ -30,8 +38,39 @@ pub const chunk = 16;
 pub const chunks_x = size / chunk;
 pub const chunks_z = (rows - 1) / chunk;
 
-/// Where each player's base is (the corners of the map, in from them).
-pub const bases = [4][2]f32{ .{ 16, 16 }, .{ size - 16, size - 16 }, .{ size - 16, 16 }, .{ 16, size - 16 } };
+/// The map's middle (a corner of the lattice, on an even row: its column
+/// and row, and where it is), and how far its hexagon reaches from it to
+/// its corners (east and west; its top and bottom edges are √3/2 of that
+/// from it).
+pub const centre_col = margin_cols + size / 2;
+pub const centre_row = margin_rows + 56;
+pub const centre = [2]f32{ size / 2, 56 * row_gap };
+pub const radius: f32 = size / 2;
+
+/// Where each player's base is: towards four of the hexagon's corners,
+/// each across the middle from the next (the first two face each other).
+pub const bases = blk: {
+    var out: [4][2]f32 = undefined;
+    const angles = [4]f32{ 240, 60, 300, 120 };
+    for (&out, angles) |*b, deg| {
+        const a = deg * std.math.pi / 180.0;
+        b.* = .{ centre[0] + @cos(a) * radius * 0.68, centre[1] + @sin(a) * radius * 0.68 };
+    }
+    break :blk out;
+};
+
+/// How far (x, z) is inside the map's hexagon, in blocks (below 0:
+/// outside it).
+pub fn inside(x: f32, z: f32) f32 {
+    const dx = @abs(x - centre[0]);
+    const dz = @abs(z - centre[1]);
+    const half_height = radius * row_gap;
+    // Its top and bottom edges, and its four slanted ones.
+    return @min(half_height - dz, (radius - dx) * row_gap - dz / 2);
+}
+
+/// How much darker the ground past the hexagon is.
+const outside_light: f32 = 0.42;
 /// How far round a base the ground is level.
 const base_radius: f32 = 9;
 
@@ -39,9 +78,13 @@ pub const Map = struct {
     /// Each corner's height, row by row.
     heights: [rows * cols]f32,
 
-    /// Where corner (c, r) is, across and down.
+    /// Where corner (c, r) is, across and down (the hexagon's square from
+    /// (0, 0)).
     pub fn at(c: usize, r: usize) [2]f32 {
-        return .{ @as(f32, @floatFromInt(c)) + (if (r % 2 == 1) @as(f32, 0.5) else 0), @as(f32, @floatFromInt(r)) * row_gap };
+        return .{
+            @as(f32, @floatFromInt(c)) + (if (r % 2 == 1) @as(f32, 0.5) else 0) - margin_cols,
+            (@as(f32, @floatFromInt(r)) - margin_rows) * row_gap,
+        };
     }
 
     pub fn generate(m: *Map, seed: u32) void {
@@ -85,9 +128,9 @@ pub const Map = struct {
 
     /// The ground's height at (x, z), on its triangle.
     pub fn heightAt(m: *const Map, x: f32, z: f32) f32 {
-        const r: usize = @intFromFloat(std.math.clamp(@floor(z / row_gap), 0, rows - 2));
+        const r: usize = @intFromFloat(std.math.clamp(@floor(z / row_gap) + margin_rows, 0, rows - 2));
         // The columns the point may be between (each row is offset).
-        const c0: usize = @intFromFloat(std.math.clamp(@floor(x - 0.5), 0, cols - 2));
+        const c0: usize = @intFromFloat(std.math.clamp(@floor(x - 0.5) + margin_cols, 0, cols - 2));
         var best: f32 = 0;
         var best_out: f32 = std.math.inf(f32);
         var c = c0;
@@ -121,7 +164,7 @@ pub const Map = struct {
     /// Whether a unit on the ground can be at (x, z): on the map, out of
     /// the water, and not too steep.
     pub fn passable(m: *const Map, x: f32, z: f32) bool {
-        if (x < 0.5 or z < 0.5 or x > size - 0.5 or z > size - 0.5) return false;
+        if (inside(x, z) < 0.5) return false;
         const h = m.heightAt(x, z);
         if (h < water_level + 0.05) return false;
         const dx = m.heightAt(x + 0.3, z) - m.heightAt(x - 0.3, z);
@@ -150,7 +193,7 @@ pub const Map = struct {
                     const mid = (lo + hi) / math.splat(2);
                     if (mid[1] <= m.surfaceAt(mid[0], mid[2])) hi = mid else lo = mid;
                 }
-                if (hi[0] < 0 or hi[2] < 0 or hi[0] > size or hi[2] > size) return null;
+                if (inside(hi[0], hi[2]) < 0) return null;
                 return hi;
             }
             last = p;
@@ -163,7 +206,9 @@ pub const Map = struct {
 
     /// Where chunk (cx, cz) is, across and down: from, and to.
     pub fn chunkBounds(cx: usize, cz: usize) [2][2]f32 {
-        return .{ .{ @floatFromInt(cx * chunk), @as(f32, @floatFromInt(cz * chunk)) * row_gap }, .{ @as(f32, @floatFromInt((cx + 1) * chunk)) + 0.5, @as(f32, @floatFromInt((cz + 1) * chunk)) * row_gap } };
+        const lo = at(cx * chunk, cz * chunk);
+        const hi = at((cx + 1) * chunk, (cz + 1) * chunk);
+        return .{ lo, .{ hi[0] + 0.5, hi[1] } };
     }
 
     /// The triangles of chunk (cx, cz), and its water, into `out`;
@@ -173,18 +218,22 @@ pub const Map = struct {
         for (cz * chunk..(cz + 1) * chunk) |r| for (cx * chunk..(cx + 1) * chunk) |c| {
             for (trianglesAt(c, r)) |t| {
                 var q = [3]V3{ m.point(t[0][0], t[0][1]), m.point(t[1][0], t[1][1]), m.point(t[2][0], t[2][1]) };
+                // Those past the hexagon, dimmed.
+                const past = @min(inside(q[0][0], q[0][2]), @min(inside(q[1][0], q[1][2]), inside(q[2][0], q[2][2]))) < -1e-3;
+                const light: f32 = if (past) outside_light else 1;
                 // Facing up (counter-clockwise from above).
                 if (math.cross(q[1] - q[0], q[2] - q[0])[1] < 0) std.mem.swap(V3, &q[1], &q[2]);
                 const n = math.cross(q[1] - q[0], q[2] - q[0]);
                 const lowest = @min(q[0][1], @min(q[1][1], q[2][1]));
                 const mid = (q[0][1] + q[1][1] + q[2][1]) / 3;
                 const steep = 1 - math.normalize(n)[1];
-                b.triangle(q, groundColour(mid, steep, @intCast(c * 31 + r * 17)));
+                const ground = groundColour(mid, steep, @intCast(c * 31 + r * 17));
+                b.shaded(q, dim(mesh.lit(ground, n), light));
                 // Water over what is under it.
                 if (lowest < water_level) {
                     const w = [3]V3{ .{ q[0][0], water_level, q[0][2] }, .{ q[1][0], water_level, q[1][2] }, .{ q[2][0], water_level, q[2][2] } };
                     const deep = std.math.clamp((water_level - mid) / 1.5, 0, 1);
-                    b.shaded(w, mixRgb(mesh.rgb(0x3f8fb0), mesh.rgb(0x1d4f7a), deep));
+                    b.shaded(w, dim(mixRgb(mesh.rgb(0x3f8fb0), mesh.rgb(0x1d4f7a), deep), light));
                 }
             }
         };
@@ -202,6 +251,10 @@ fn groundColour(h: f32, steep: f32, salt: u32) mesh.Rgb {
     var c = if (h < water_level + 0.35) sand else mixRgb(grass, dry, smoothstep(1.8, 3.4, h));
     c = mixRgb(c, rock, @max(smoothstep(0.18, 0.4, steep), smoothstep(3.6, 4.6, h)));
     const k = 0.94 + 0.1 * hash(salt);
+    return .{ c[0] * k, c[1] * k, c[2] * k };
+}
+
+fn dim(c: mesh.Rgb, k: f32) mesh.Rgb {
     return .{ c[0] * k, c[1] * k, c[2] * k };
 }
 
@@ -275,6 +328,39 @@ test "the ground: level round the bases, its height on its triangles, rays meeti
     try testing.expectApproxEqAbs(@as(f32, 1.5), hit[1], 0.05);
 }
 
+test "the map is a hexagon: its corners on the lattice; past it, the ground dimmed, where nothing goes" {
+    const m = try testing.allocator.create(Map);
+    defer testing.allocator.destroy(m);
+    m.generate(1);
+    // Its six corners on corners of the lattice.
+    try testing.expectApproxEqAbs(@as(f32, 0), inside(centre[0] - radius, centre[1]), 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 0), inside(centre[0] + radius / 2, centre[1] - radius * row_gap), 1e-3);
+    const top = Map.at(centre_col - size / 4, centre_row - size / 2);
+    try testing.expectApproxEqAbs(@as(f32, 0), inside(top[0], top[1]), 1e-3);
+    try testing.expectEqual(centre, Map.at(centre_col, centre_row));
+    // The square's corners are outside; the bases well in.
+    try testing.expect(inside(1, 1) < 0 and inside(size - 1, 1) < 0);
+    for (bases) |b| try testing.expect(inside(b[0], b[1]) > 10);
+    // The ground goes on far past it, darker; nothing goes there.
+    var verts: [Map.chunk_vertices]Vertex = undefined;
+    var farthest: f32 = 0;
+    var brightest_out: f32 = 0;
+    var brightest_in: f32 = 0;
+    for (0..chunks_z) |cz| for (0..chunks_x) |cx| {
+        const n = m.chunkMesh(cx, cz, &verts);
+        for (verts[0..n]) |v| {
+            const d = inside(v.pos[0], v.pos[2]);
+            farthest = @min(farthest, d);
+            const light = v.color[0] + v.color[1] + v.color[2];
+            if (d < -2) brightest_out = @max(brightest_out, light) else if (d > 2) brightest_in = @max(brightest_in, light);
+        }
+    };
+    try testing.expect(farthest < -40);
+    try testing.expect(brightest_out < brightest_in * 0.6);
+    try testing.expect(!m.passable(centre[0] - radius - 1, centre[1]));
+    try testing.expect(m.raycast(.{ centre[0] - radius - 10, 30, centre[1] }, .{ 0, -1, 0 }) == null);
+}
+
 test "the triangles: equilateral from above, facing up, six round each corner" {
     const m = try testing.allocator.create(Map);
     defer testing.allocator.destroy(m);
@@ -283,7 +369,7 @@ test "the triangles: equilateral from above, facing up, six round each corner" {
     const n = m.chunkMesh(1, 1, &verts);
     try testing.expect(n >= chunk * chunk * 6);
     var round: usize = 0;
-    const centre = Map.at(24, 24);
+    const at = Map.at(24, 24);
     var i: usize = 0;
     while (i < n) : (i += 3) {
         const p: [3]V3 = .{ verts[i].pos, verts[i + 1].pos, verts[i + 2].pos };
@@ -295,7 +381,7 @@ test "the triangles: equilateral from above, facing up, six round each corner" {
             const b = p[(k + 1) % 3];
             try testing.expectApproxEqAbs(@as(f32, 1), @sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[2] - b[2]) * (a[2] - b[2])), 1e-4);
         }
-        for (p) |q| if (@abs(q[0] - centre[0]) < 1e-4 and @abs(q[2] - centre[1]) < 1e-4) {
+        for (p) |q| if (@abs(q[0] - at[0]) < 1e-4 and @abs(q[2] - at[1]) < 1e-4) {
             round += 1;
         };
     }

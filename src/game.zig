@@ -133,9 +133,10 @@ pub const Game = struct {
             const r = g.camera.right();
             const f = math.normalize(.{ g.camera.forward()[0], 0, g.camera.forward()[2] });
             const speed = g.camera.zoom * 1.4 * dt;
-            g.camera.target += (r * math.splat(dx) + f * math.splat(dz)) * math.splat(speed);
-            g.camera.target[0] = std.math.clamp(g.camera.target[0], 0, map_mod.size);
-            g.camera.target[2] = std.math.clamp(g.camera.target[2], 0, map_mod.size);
+            const moved = g.camera.target + (r * math.splat(dx) + f * math.splat(dz)) * math.splat(speed);
+            // Over the map (its hexagon), a little in from its edge (the
+            // ground past it is there to the edge of the view).
+            if (map_mod.inside(moved[0], moved[2]) > 6) g.camera.target = moved;
             g.camera.target[1] = g.map.surfaceAt(g.camera.target[0], g.camera.target[2]);
         }
     }
@@ -150,7 +151,8 @@ pub const Game = struct {
     }
 
     pub fn zoom(g: *Game, by: f32) void {
-        g.camera.zoom = std.math.clamp(g.camera.zoom * by, 6, 40);
+        // No further out than the ground past the map reaches.
+        g.camera.zoom = std.math.clamp(g.camera.zoom * by, 6, 24);
     }
 
     // --- The mouse ----------------------------------------------------------------------
