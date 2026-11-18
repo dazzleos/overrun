@@ -19,7 +19,7 @@ const V3 = math.V3;
 const Vertex = mesh.Vertex;
 
 /// Blocks across the hexagon that can be played on, east to west.
-pub const size = 256;
+pub const size = 512;
 /// How far apart the rows of corners are.
 pub const row_gap: f32 = 0.8660254;
 /// Corners, and rows of them, past the hexagon's square each way: the
@@ -81,9 +81,59 @@ const outside_light: f32 = 0.42;
 /// How far round a base the ground is level.
 const base_radius: f32 = 9;
 
+/// The lowest and highest the ground can be (see `heightOf`).
+pub const lowest: f32 = -0.6;
+pub const highest: f32 = 4.8;
+
+/// The ground's height at (x, z), made from the map's seed: noise, ridges
+/// here and there, and level round each base.
+pub fn heightOf(seed: u32, x: f32, z: f32) f32 {
+    // (Each term from 0 to 1: from `lowest` to `highest` in all.)
+    var h = 3.2 * fbm(seed, x / 22, z / 22, 4) - 0.6;
+    const rr = 1 - @abs(noise(seed +% 7, x / 14, z / 14) * 2 - 1);
+    h += 2.2 * rr * rr * fbm(seed +% 11, x / 30, z / 30, 2);
+    for (bases) |b| {
+        const d = @sqrt((x - b[0]) * (x - b[0]) + (z - b[1]) * (z - b[1]));
+        const k = smoothstep(base_radius + 6, base_radius, d);
+        h = h * (1 - k) + 1.5 * k;
+    }
+    return h;
+}
+
+/// The ground's colour at a height, and how steep it is there (from 0,
+/// level).
+pub fn colourOf(h: f32, steep: f32, salt: u32) mesh.Rgb {
+    return groundColour(h, steep, salt);
+}
+
+/// What a height is kept as: 1/1024ths of a block.
+const height_scale: f32 = 1024;
+
 pub const Map = struct {
-    /// Each corner's height, row by row.
-    heights: [rows * cols]f32,
+    seed: u32,
+    /// Each corner's height, row by row: made a chunk at a time, when it
+    /// is first wanted (a corner of a chunk's, or a point on it), so a
+    /// game starts at once, however large the map.
+    heights: []i16,
+    /// Which chunks' heights are made.
+    made: []bool,
+
+    pub fn create(gpa: std.mem.Allocator, seed: u32) !*Map {
+        const m = try gpa.create(Map);
+        errdefer gpa.destroy(m);
+        const heights = try gpa.alloc(i16, rows * cols);
+        errdefer gpa.free(heights);
+        const made = try gpa.alloc(bool, chunks_x * chunks_z);
+        @memset(made, false);
+        m.* = .{ .seed = seed, .heights = heights, .made = made };
+        return m;
+    }
+
+    pub fn destroy(m: *Map, gpa: std.mem.Allocator) void {
+        gpa.free(m.heights);
+        gpa.free(m.made);
+        gpa.destroy(m);
+    }
 
     /// Where corner (c, r) is, across and down (the hexagon's square from
     /// (0, 0)).
@@ -94,27 +144,25 @@ pub const Map = struct {
         };
     }
 
-    pub fn generate(m: *Map, seed: u32) void {
-        for (0..rows) |r| for (0..cols) |c| {
+    /// Makes chunk (cx, cz)'s heights: its corners, and (the last in a
+    /// row or column) the map's last ones.
+    fn makeHeights(m: *const Map, cx: usize, cz: usize) void {
+        const r_end = if (cz == chunks_z - 1) rows else (cz + 1) * chunk;
+        const c_end = if (cx == chunks_x - 1) cols else (cx + 1) * chunk;
+        for (cz * chunk..r_end) |r| for (cx * chunk..c_end) |c| {
             const p = at(c, r);
-            const fx = p[0];
-            const fz = p[1];
-            var h = 3.2 * fbm(seed, fx / 22, fz / 22, 4) - 0.6;
-            // Ridges here and there.
-            const rr = 1 - @abs(noise(seed +% 7, fx / 14, fz / 14) * 2 - 1);
-            h += 2.2 * rr * rr * fbm(seed +% 11, fx / 30, fz / 30, 2);
-            // Level ground round each base.
-            for (bases) |b| {
-                const d = @sqrt((fx - b[0]) * (fx - b[0]) + (fz - b[1]) * (fz - b[1]));
-                const k = smoothstep(base_radius + 6, base_radius, d);
-                h = h * (1 - k) + 1.5 * k;
-            }
-            m.heights[r * cols + c] = h;
+            m.heights[r * cols + c] = @intFromFloat(@round(heightOf(m.seed, p[0], p[1]) * height_scale));
         };
+        m.made[cz * chunks_x + cx] = true;
     }
 
-    pub fn corner(m: *const Map, c: usize, r: usize) f32 {
-        return m.heights[@as(usize, @min(r, rows - 1)) * cols + @as(usize, @min(c, cols - 1))];
+    pub fn corner(m: *const Map, c_: usize, r_: usize) f32 {
+        const c = @as(usize, @min(c_, cols - 1));
+        const r = @as(usize, @min(r_, rows - 1));
+        const cx = @as(usize, @min(c / chunk, chunks_x - 1));
+        const cz = @as(usize, @min(r / chunk, chunks_z - 1));
+        if (!m.made[cz * chunks_x + cx]) m.makeHeights(cx, cz);
+        return @as(f32, @floatFromInt(m.heights[r * cols + c])) / height_scale;
     }
 
     fn point(m: *const Map, c: usize, r: usize) V3 {
@@ -242,16 +290,15 @@ pub const Map = struct {
                 // Facing up (counter-clockwise from above).
                 if (math.cross(q[1] - q[0], q[2] - q[0])[1] < 0) std.mem.swap(V3, &q[1], &q[2]);
                 const n = math.cross(q[1] - q[0], q[2] - q[0]);
-                const lowest = @min(q[0][1], @min(q[1][1], q[2][1]));
+                const bottom = @min(q[0][1], @min(q[1][1], q[2][1]));
                 const mid = (q[0][1] + q[1][1] + q[2][1]) / 3;
                 const steep = 1 - math.normalize(n)[1];
                 const ground = groundColour(mid, steep, @intCast(c * 31 + r * 17));
                 b.shaded(q, dim(mesh.lit(ground, n), light));
                 // Water over what is under it.
-                if (lowest < water_level) {
+                if (bottom < water_level) {
                     const w = [3]V3{ .{ q[0][0], water_level, q[0][2] }, .{ q[1][0], water_level, q[1][2] }, .{ q[2][0], water_level, q[2][2] } };
-                    const deep = std.math.clamp((water_level - mid) / 1.5, 0, 1);
-                    b.shaded(w, dim(mixRgb(mesh.rgb(0x3f8fb0), mesh.rgb(0x1d4f7a), deep), light));
+                    b.shaded(w, dim(waterColour(mid), light));
                 }
             }
         };
@@ -270,6 +317,12 @@ fn groundColour(h: f32, steep: f32, salt: u32) mesh.Rgb {
     c = mixRgb(c, rock, @max(smoothstep(0.18, 0.4, steep), smoothstep(3.6, 4.6, h)));
     const k = 0.94 + 0.1 * hash(salt);
     return .{ c[0] * k, c[1] * k, c[2] * k };
+}
+
+/// The water's colour over ground `h` high: darker where it is deeper.
+pub fn waterColour(h: f32) mesh.Rgb {
+    const deep = std.math.clamp((water_level - h) / 1.5, 0, 1);
+    return mixRgb(mesh.rgb(0x3f8fb0), mesh.rgb(0x1d4f7a), deep);
 }
 
 fn dim(c: mesh.Rgb, k: f32) mesh.Rgb {
@@ -329,9 +382,8 @@ fn fbm(seed: u32, x: f32, z: f32, octaves: u32) f32 {
 const testing = std.testing;
 
 test "the ground: level round the bases, its height on its triangles, rays meeting it" {
-    const m = try testing.allocator.create(Map);
-    defer testing.allocator.destroy(m);
-    m.generate(1);
+    const m = try Map.create(testing.allocator, 1);
+    defer m.destroy(testing.allocator);
     for (bases) |b| {
         try testing.expectApproxEqAbs(@as(f32, 1.5), m.heightAt(b[0], b[1]), 0.01);
         try testing.expect(m.passable(b[0], b[1]));
@@ -347,9 +399,8 @@ test "the ground: level round the bases, its height on its triangles, rays meeti
 }
 
 test "the map is a hexagon: its corners on the lattice; past it, the ground dimmed, where nothing goes" {
-    const m = try testing.allocator.create(Map);
-    defer testing.allocator.destroy(m);
-    m.generate(1);
+    const m = try Map.create(testing.allocator, 1);
+    defer m.destroy(testing.allocator);
     // Its six corners on corners of the lattice.
     try testing.expectApproxEqAbs(@as(f32, 0), inside(centre[0] - radius, centre[1]), 1e-3);
     try testing.expectApproxEqAbs(@as(f32, 0), inside(centre[0] + radius / 2, centre[1] - radius * row_gap), 1e-3);
@@ -383,9 +434,8 @@ test "the map is a hexagon: its corners on the lattice; past it, the ground dimm
 }
 
 test "the triangles: equilateral from above, facing up, six round each corner" {
-    const m = try testing.allocator.create(Map);
-    defer testing.allocator.destroy(m);
-    m.generate(1);
+    const m = try Map.create(testing.allocator, 1);
+    defer m.destroy(testing.allocator);
     var verts: [Map.chunk_vertices]Vertex = undefined;
     const n = m.chunkMesh(1, 1, &verts);
     try testing.expect(n >= chunk * chunk * 6);

@@ -13,6 +13,7 @@ const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
 const math = @import("math.zig");
 const mesh = @import("mesh.zig");
+const map_mod = @import("map.zig");
 const models = @import("models.zig");
 const game_mod = @import("game.zig");
 const renderer_mod = @import("renderer.zig");
@@ -62,7 +63,7 @@ const Scene = struct {
             const age = g.world.time - sent.time;
             if (age < 0.8) models.ring(&b, sent.at + V3{ 0, 0.06, 0 }, 0.3 + age, mesh.rgb(0xffd25a));
         }
-        try s.renderer.draw(renderer_mod.FrameSink{ .frame = f }, vp, scissor, m, b.n);
+        try s.renderer.draw(renderer_mod.FrameSink{ .frame = f }, vp, scissor, m, g.camera.groundBox(aspect, map_mod.lowest, map_mod.highest), b.n);
     }
 };
 
@@ -164,6 +165,7 @@ test {
     _ = @import("math.zig");
     _ = @import("mesh.zig");
     _ = @import("map.zig");
+    _ = @import("minimap.zig");
     _ = @import("units.zig");
     _ = @import("models.zig");
     _ = @import("renderer.zig");

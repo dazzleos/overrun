@@ -6,7 +6,8 @@
 //! it: each made from the map's heights (kept in ordinary memory) as it
 //! comes into view, and let go of once it is well out of it, so the GPU's
 //! memory holds only what can be seen (about 2 MB), however large the
-//! map is.
+//! map is. Only the chunks under the view are looked at (and those kept),
+//! so a frame takes no longer on a larger map.
 
 const std = @import("std");
 const vc4 = @import("vc4");
@@ -42,8 +43,9 @@ pub const Stats = struct {
 const Chunk = struct {
     bo: ?vc4.Bo = null,
     count: u32 = 0,
-    lo: f32,
-    hi: f32,
+    /// As low and high as it can be, until its heights are made.
+    lo: f32 = @min(map_mod.lowest, map_mod.water_level),
+    hi: f32 = map_mod.highest,
 };
 
 /// How many chunks are made in a frame (the rest in the frames after:
@@ -63,6 +65,8 @@ pub fn Renderer(comptime Device: type) type {
         flat: shader.Pipeline,
         map: *const Map,
         chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk,
+        /// The chunks on the GPU.
+        kept: std.ArrayList(u16) = .empty,
         /// Where a chunk's triangles are made, before they go to the GPU.
         scratch: []Vertex,
         /// Every chunk in view made, however many (the first frame, and
@@ -84,13 +88,7 @@ pub fn Renderer(comptime Device: type) type {
                 .early_z = true,
             });
             errdefer flat.deinit(dev);
-            // How high each chunk goes (its triangles are made when it is
-            // in view).
-            var chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk = undefined;
-            for (0..map_mod.chunks_z) |cz| for (0..map_mod.chunks_x) |cx| {
-                const range = m.chunkHeights(cx, cz);
-                chunks[cz * map_mod.chunks_x + cx] = .{ .lo = @min(range[0], map_mod.water_level), .hi = range[1] };
-            };
+            const chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk = @splat(.{});
             const scratch = try gpa.alloc(Vertex, Map.chunk_vertices);
             errdefer gpa.free(scratch);
             const d0 = try dev.createBo(max_dynamic * @sizeOf(Vertex));
@@ -102,7 +100,8 @@ pub fn Renderer(comptime Device: type) type {
 
         pub fn deinit(r: *Self) void {
             r.flat.deinit(r.dev);
-            for (&r.chunks) |*c| r.letGo(c);
+            for (r.kept.items) |i| r.letGo(&r.chunks[i]);
+            r.kept.deinit(r.gpa);
             r.gpa.free(r.scratch);
             for (r.dynamic) |bo| r.dev.destroyBo(bo);
             r.gpa.destroy(r);
@@ -116,38 +115,49 @@ pub fn Renderer(comptime Device: type) type {
         }
 
         /// Draws the ground in view, and `dynamic` vertices of the buffer
-        /// `dynamicVertices` gave, with `vp` (world to clip space).
-        pub fn draw(r: *Self, sink: anytype, viewport: vc4.render.Viewport, scissor: ?vc4.render.Viewport, vp: math.Mat4, dynamic: usize) !void {
+        /// `dynamicVertices` gave, with `vp` (world to clip space); `ground`
+        /// is what of the ground can be in view (from `Camera.groundBox`).
+        pub fn draw(r: *Self, sink: anytype, viewport: vc4.render.Viewport, scissor: ?vc4.render.Viewport, vp: math.Mat4, ground: [2][2]f32, dynamic: usize) !void {
             r.stats = .{};
             const u: Uniforms = .{ .mvp = vp };
             r.flat.setUniforms(std.mem.asBytes(&u));
-            var made: u32 = 0;
-            for (&r.chunks, 0..) |*c, i| {
+            // Those well out of view let go of.
+            const keep = chunksIn(ground, keep_past);
+            var k: usize = 0;
+            while (k < r.kept.items.len) {
+                const i = r.kept.items[k];
                 const cx = i % map_mod.chunks_x;
                 const cz = i / map_mod.chunks_x;
+                if (cx < keep[0][0] or cx > keep[1][0] or cz < keep[0][1] or cz > keep[1][1]) {
+                    r.letGo(&r.chunks[i]);
+                    _ = r.kept.swapRemove(k);
+                } else k += 1;
+            }
+            // Those in view drawn (made first, a few a frame, if need be).
+            const range = chunksIn(ground, 0);
+            var made: u32 = 0;
+            for (range[0][1]..range[1][1] + 1) |cz| for (range[0][0]..range[1][0] + 1) |cx| {
+                const i = cz * map_mod.chunks_x + cx;
+                const c = &r.chunks[i];
                 const b = Map.chunkBounds(cx, cz);
-                const lo = V3{ b[0][0], c.lo, b[0][1] };
-                const hi = V3{ b[1][0], c.hi, b[1][1] };
-                if (!inView(vp, lo, hi)) {
-                    // Well out of view: let go of.
-                    const k = math.splat(keep_past);
-                    if (c.bo != null and !inView(vp, lo - k, hi + k)) r.letGo(c);
-                    continue;
-                }
+                if (!inView(vp, .{ b[0][0], c.lo, b[0][1] }, .{ b[1][0], c.hi, b[1][1] })) continue;
                 if (c.bo == null) {
-                    // Come into view: made (a few a frame).
                     if (!r.all_now and made >= made_per_frame) continue;
                     r.make(c, cx, cz) catch continue;
+                    r.kept.append(r.gpa, @intCast(i)) catch {
+                        r.letGo(c);
+                        continue;
+                    };
                     made += 1;
                 }
                 r.stats.chunks += 1;
                 if (c.count > 0) try r.drawRange(sink, c.bo.?.handle, 0, c.count, viewport, scissor);
-            }
-            r.all_now = false;
-            for (r.chunks) |c| if (c.bo) |bo| {
-                r.stats.kept += 1;
-                r.stats.kept_bytes += bo.map.len;
             };
+            r.all_now = false;
+            for (r.kept.items) |i| {
+                r.stats.kept += 1;
+                r.stats.kept_bytes += r.chunks[i].bo.?.map.len;
+            }
             try r.drawRange(sink, r.dynamic[r.which].handle, 0, @intCast(dynamic), viewport, scissor);
         }
 
@@ -158,6 +168,10 @@ pub fn Renderer(comptime Device: type) type {
             @memcpy(bo.map[0 .. n * @sizeOf(Vertex)], std.mem.sliceAsBytes(r.scratch[0..n]));
             c.bo = bo;
             c.count = @intCast(n);
+            // How high it goes, now its heights are made.
+            const range = r.map.chunkHeights(cx, cz);
+            c.lo = @min(range[0], map_mod.water_level);
+            c.hi = range[1];
         }
 
         /// Takes a chunk off the GPU (one still being drawn is kept by the
@@ -187,6 +201,21 @@ pub fn Renderer(comptime Device: type) type {
             }
         }
     };
+}
+
+/// The chunks (from, to: across and down) under `ground` (from (x, z), to
+/// (x, z)), `past` blocks further each way, on the map.
+fn chunksIn(ground: [2][2]f32, past: f32) [2][2]usize {
+    const per_row = map_mod.row_gap * map_mod.chunk;
+    const x0 = (ground[0][0] - past - 0.5 + map_mod.margin_cols) / map_mod.chunk;
+    const x1 = (ground[1][0] + past + map_mod.margin_cols) / map_mod.chunk;
+    const z0 = ground[0][1] / per_row - past / per_row + map_mod.margin_rows / @as(f32, map_mod.chunk);
+    const z1 = ground[1][1] / per_row + past / per_row + map_mod.margin_rows / @as(f32, map_mod.chunk);
+    return .{ .{ clampChunk(x0, map_mod.chunks_x), clampChunk(z0, map_mod.chunks_z) }, .{ clampChunk(x1, map_mod.chunks_x), clampChunk(z1, map_mod.chunks_z) } };
+}
+
+fn clampChunk(f: f32, n: usize) usize {
+    return @intFromFloat(std.math.clamp(@floor(f), 0, @as(f32, @floatFromInt(n - 1))));
 }
 
 /// Whether any of a box (from `lo` to `hi`) may be in view: not all of its
@@ -219,6 +248,22 @@ pub const FrameSink = struct {
 };
 
 const testing = std.testing;
+
+test "the chunks under the view: all the ground seen, and not much more" {
+    const c: math.Camera = .{ .target = .{ 120, 1, 90 }, .zoom = 24 };
+    const aspect: f32 = 16.0 / 9.0;
+    const range = chunksIn(c.groundBox(aspect, map_mod.lowest, map_mod.highest), 0);
+    // Ground across the view, from as low as it goes to as high: in a
+    // chunk in the range.
+    for (0..9) |i| for (0..9) |j| for ([_]f32{ map_mod.lowest, map_mod.highest }) |y| {
+        const r = c.ray(aspect, @as(f32, @floatFromInt(i)) / 4 - 1, @as(f32, @floatFromInt(j)) / 4 - 1);
+        const p = r.origin + r.dir * math.splat((y - r.origin[1]) / r.dir[1]);
+        const at = chunksIn(.{ .{ p[0], p[2] }, .{ p[0], p[2] } }, 0);
+        try testing.expect(at[0][0] >= range[0][0] and at[1][0] <= range[1][0] and at[0][1] >= range[0][1] and at[1][1] <= range[1][1]);
+    };
+    // Far fewer than all of the map's.
+    try testing.expect((range[1][0] - range[0][0] + 1) * (range[1][1] - range[0][1] + 1) < 120);
+}
 
 test "a box in view, or not" {
     const c: math.Camera = .{ .target = .{ 50, 1, 50 } };

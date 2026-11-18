@@ -389,8 +389,7 @@ pub fn angleDiff(target: f32, current: f32) f32 {
 const testing = std.testing;
 
 fn testWorld() !struct { map: *Map, world: *World } {
-    const m = try testing.allocator.create(Map);
-    m.generate(1);
+    const m = try Map.create(testing.allocator, 1);
     const w = try testing.allocator.create(World);
     w.* = .{ .map = m };
     return .{ .map = m, .world = w };
@@ -398,7 +397,7 @@ fn testWorld() !struct { map: *Map, world: *World } {
 
 test "a base: its buildings, and units that go where they are sent" {
     const tw = try testWorld();
-    defer testing.allocator.destroy(tw.map);
+    defer tw.map.destroy(testing.allocator);
     defer testing.allocator.destroy(tw.world);
     const w = tw.world;
     w.addBase(0);
@@ -424,7 +423,7 @@ test "a base: its buildings, and units that go where they are sent" {
 
 test "a factory makes what is queued, paying as it goes, and sends it out" {
     const tw = try testWorld();
-    defer testing.allocator.destroy(tw.map);
+    defer tw.map.destroy(testing.allocator);
     defer testing.allocator.destroy(tw.world);
     const w = tw.world;
     w.addBase(0);

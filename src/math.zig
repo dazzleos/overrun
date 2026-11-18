@@ -100,6 +100,21 @@ pub const Camera = struct {
         return mul(proj, view);
     }
 
+    /// What of the ground can be in a view `aspect` wide, for ground
+    /// from `lo` to `hi` high: from (x, z), to (x, z).
+    pub fn groundBox(c: Camera, aspect: f32, lo: f32, hi: f32) [2][2]f32 {
+        var box: [2][2]f32 = .{ .{ std.math.inf(f32), std.math.inf(f32) }, .{ -std.math.inf(f32), -std.math.inf(f32) } };
+        for ([_][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ -1, 1 }, .{ 1, 1 } }) |k| {
+            const r = c.ray(aspect, k[0], k[1]);
+            for ([_]f32{ lo, hi }) |y| {
+                const p = r.origin + r.dir * splat((y - r.origin[1]) / r.dir[1]);
+                box[0] = .{ @min(box[0][0], p[0]), @min(box[0][1], p[2]) };
+                box[1] = .{ @max(box[1][0], p[0]), @max(box[1][1], p[2]) };
+            }
+        }
+        return box;
+    }
+
     /// The ray through a point of the view (x and y from -1 to 1, y up):
     /// where it starts, near the eye, and its way (the camera's).
     pub fn ray(c: Camera, aspect: f32, x: f32, y: f32) struct { origin: V3, dir: V3 } {

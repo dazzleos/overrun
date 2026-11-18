@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const kete = @import("kete");
+const minimap_mod = @import("minimap.zig");
 const math = @import("math.zig");
 const map_mod = @import("map.zig");
 const units = @import("units.zig");
@@ -40,6 +41,9 @@ pub const Game = struct {
     gpa: std.mem.Allocator,
     map: *Map,
     world: *World,
+    minimap: *minimap_mod.Minimap,
+    /// The left button held on the minimap (the view follows it).
+    minimap_held: bool = false,
     camera: math.Camera,
     /// What is chosen: indices into the world's things.
     chosen: std.ArrayList(usize) = .empty,
@@ -65,12 +69,13 @@ pub const Game = struct {
     started: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, seed: u32) !Game {
-        const m = try gpa.create(Map);
-        errdefer gpa.destroy(m);
-        m.generate(seed);
+        const m = try Map.create(gpa, seed);
+        errdefer m.destroy(gpa);
+        const mm = try minimap_mod.Minimap.create(gpa, seed);
+        errdefer mm.destroy(gpa);
         const w = try gpa.create(World);
         w.* = .{ .map = m };
-        var g: Game = .{ .gpa = gpa, .map = m, .world = w, .camera = .{ .target = .{ 0, 0, 0 } } };
+        var g: Game = .{ .gpa = gpa, .map = m, .world = w, .minimap = mm, .camera = .{ .target = .{ 0, 0, 0 } } };
         g.newGame();
         return g;
     }
@@ -78,7 +83,8 @@ pub const Game = struct {
     pub fn deinit(g: *Game) void {
         g.chosen.deinit(g.gpa);
         g.gpa.destroy(g.world);
-        g.gpa.destroy(g.map);
+        g.minimap.destroy(g.gpa);
+        g.map.destroy(g.gpa);
     }
 
     /// A new game: this player's base, the view on it.
@@ -209,6 +215,21 @@ pub const Game = struct {
             g.camera.target = moved;
             return;
         }
+    }
+
+    /// Moves the view's middle to (x, z), or as near as it keeps to the
+    /// map.
+    pub fn lookAt(g: *Game, p: [2]f32) void {
+        g.camera.target = .{ p[0], g.map.surfaceAt(p[0], p[1]), p[1] };
+        g.keepViewOnMap();
+    }
+
+    /// The ground at the view's corners (top left, top right, bottom
+    /// right, bottom left): what is seen of it.
+    pub fn viewCorners(g: *const Game) [4][2]f32 {
+        var out: [4][2]f32 = undefined;
+        for (&out, [4][2]f32{ .{ -1, 1 }, .{ 1, 1 }, .{ 1, -1 }, .{ -1, -1 } }) |*o, k| o.* = g.groundOfView(g.camera.target, g.camera.zoom, k[0], k[1]);
+        return out;
     }
 
     pub fn panDown(g: *Game, p: kete.Point) void {

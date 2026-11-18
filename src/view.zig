@@ -9,6 +9,7 @@ const gfx = kete.gfx;
 const vc4 = @import("vc4");
 const game_mod = @import("game.zig");
 const units = @import("units.zig");
+const minimap = @import("minimap.zig");
 const font = kete.font;
 
 const Game = game_mod.Game;
@@ -39,6 +40,7 @@ pub const Overrun = struct {
         layers.append(a, cx.make(Battlefield{ .game = g, .draw = self.draw })) catch {};
         if (g.dragBox() != null) layers.append(a, cx.make(DragBox{ .game = g })) catch {};
         layers.append(a, cx.make(kete.Align{ .alignment = .top_left, .child = cx.make(kete.Padding{ .padding = .all(12), .child = resources(cx, g) }) })) catch {};
+        if (!g.menu_open) layers.append(a, cx.make(kete.Align{ .alignment = .top_right, .child = cx.make(kete.Padding{ .padding = .all(12), .child = cx.make(Minimap{ .game = g }) }) })) catch {};
         if (!g.menu_open) if (chosenPanel(cx, g)) |p| layers.append(a, cx.make(kete.Align{ .alignment = .bottom_center, .child = cx.make(kete.Padding{ .padding = .all(14), .child = p }) })) catch {};
         if (g.menu_open) {
             layers.append(a, cx.make(kete.Align{ .alignment = .center, .child = menu(cx, g) })) catch {};
@@ -147,6 +149,72 @@ const DragBox = struct {
         var c = p.canvas();
         c.fillRect(r, gfx.Color.argb(0x2238c26a));
         c.strokeRoundedRect(r, .all(0), 1.5, gfx.Color.argb(0xcc5ef08a));
+    }
+};
+
+/// The minimap: the map's hexagon, the units and buildings on it, and the
+/// view's outline; pressed (or dragged on), the view goes there.
+const Minimap = struct {
+    game: *Game,
+
+    /// Room round the hexagon (for its border, and the view's outline
+    /// past its edge).
+    const pad = 8;
+
+    pub fn layout(_: *const Minimap, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
+        return c.constrain(.{ .w = minimap.width + 2 * pad, .h = @as(f32, minimap.height) + 2 * pad });
+    }
+
+    fn at(p: [2]f32) kete.Point {
+        const q = minimap.toPixel(p);
+        return .{ q[0] + pad, q[1] + pad };
+    }
+
+    pub fn paint(self: *const Minimap, _: *kete.WidgetNode, p: *kete.Painter) void {
+        const g = self.game;
+        var c = p.canvas();
+        // A border round the hexagon.
+        var hex: [6]kete.Point = undefined;
+        const mid = minimap.toPixel(@import("map.zig").centre);
+        for (&hex, minimap.hexagon()) |*h, k| {
+            const out = [2]f32{ k[0] - mid[0], k[1] - mid[1] };
+            const len = @sqrt(out[0] * out[0] + out[1] * out[1]);
+            h.* = .{ k[0] + out[0] / len * 4 + pad, k[1] + out[1] / len * 4 + pad };
+        }
+        c.fillPolygon(&hex, panel_bg);
+        c.drawImage(&g.minimap.image, .{ .x = pad, .y = pad, .w = minimap.width, .h = @floatFromInt(minimap.height) }, 1);
+        // The units (small) and buildings (larger), in their teams' colours.
+        for (g.world.all()) |t| {
+            const q = at(.{ t.pos[0], t.pos[2] });
+            const s: f32 = if (t.kind.isBuilding()) 4 else 2.5;
+            c.fillRect(.{ .x = q[0] - s / 2, .y = q[1] - s / 2, .w = s, .h = s }, gfx.Color.rgb(units.team_colours[t.team]));
+        }
+        // What the view shows.
+        var view: [4]kete.Point = undefined;
+        for (&view, g.viewCorners()) |*v, k| v.* = at(k);
+        c.strokePolyline(&view, true, 1.5, gfx.Color.argb(0xeeffffff));
+    }
+
+    pub fn event(self: *const Minimap, _: *kete.WidgetNode, e: kete.Event) bool {
+        const g = self.game;
+        switch (e) {
+            .press => |pr| if (pr.button == .left) {
+                g.minimap_held = true;
+                g.lookAt(minimap.fromPixel(.{ pr.pos[0] - pad, pr.pos[1] - pad }));
+                return true;
+            },
+            .motion => |pos| if (g.minimap_held) {
+                g.lookAt(minimap.fromPixel(.{ pos[0] - pad, pos[1] - pad }));
+                return true;
+            },
+            .release => |r| if (r.button == .left) {
+                g.minimap_held = false;
+                return true;
+            },
+            .context => return false,
+            else => {},
+        }
+        return false;
     }
 };
 
@@ -352,6 +420,27 @@ test "dragging with the right button moves the view" {
     for (1..10) |i| u.pointerMotion(.{ 640 + @as(f32, @floatFromInt(i)) * 20, 360 });
     u.pointerButton(.{ 820, 360 }, .right, false);
     try testing.expect(math.length(g.camera.target - before) > 1);
+}
+
+test "pressing the minimap moves the view there" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    var g = try Game.init(testing.allocator, 1);
+    defer g.deinit();
+    g.closeMenu();
+    const view: Overrun = .{ .game = &g };
+    u.frame(1280, 720, 0, view);
+    // The minimap's middle (top right): the map's.
+    const mid: kete.Point = .{ 1280 - 12 - Minimap.pad - minimap.width / 2, 12 + Minimap.pad + @as(f32, minimap.height) / 2 };
+    u.pointerMotion(mid);
+    u.pointerButton(mid, .left, true);
+    u.pointerButton(mid, .left, false);
+    const centre = @import("map.zig").centre;
+    try testing.expectApproxEqAbs(centre[0], g.camera.target[0], 2);
+    try testing.expectApproxEqAbs(centre[1], g.camera.target[2], 2);
+    // Nothing chosen by it (the battlefield did not have the press).
+    try testing.expect(g.dragBox() == null);
 }
 
 fn overflows(node: *kete.WidgetNode) bool {
