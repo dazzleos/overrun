@@ -288,6 +288,9 @@ const Battlefield = struct {
         switch (e) {
             .press => |pr| switch (pr.button) {
                 .left => {
+                    // A double click on a unit: all of its kind on the
+                    // screen.
+                    if (pr.clicks >= 2 and g.chooseAllLike(pr.pos)) return true;
                     g.pointerDown(pr.pos);
                     return true;
                 },

@@ -367,6 +367,25 @@ pub const Game = struct {
         g.press = .{ .at = p, .now = p, .dragging = false };
     }
 
+    /// A double click at `p`: if on one of this player's, all of its kind
+    /// on the screen chosen (added to what is chosen, with Shift). False
+    /// if not on one (then it is a click as any other).
+    pub fn chooseAllLike(g: *Game, p: kete.Point) bool {
+        const i = g.thingAt(p) orelse return false;
+        const kind = g.world.things[i].kind;
+        if (g.world.things[i].team != me) return false;
+        if (!g.shift) g.chosen.clearRetainingCapacity();
+        for (g.world.things[0..g.world.count], 0..) |t, k| {
+            if (t.team != me or t.kind != kind or g.isChosen(k)) continue;
+            const at = g.onView(t.pos);
+            if (at[0] < 0 or at[1] < 0 or at[0] > g.view_size[0] or at[1] > g.view_size[1]) continue;
+            g.chosen.append(g.gpa, k) catch {};
+        }
+        // (Its release is not a click.)
+        g.press = null;
+        return true;
+    }
+
     pub fn pointerMoved(g: *Game, p: kete.Point) void {
         if (g.press) |*pr| {
             pr.now = p;
@@ -542,6 +561,33 @@ test "dragging with the right button moves the view, the ground following the po
     g.panDown(.{ 600, 400 });
     g.panMoved(.{ 602, 401 });
     try testing.expect(g.panUp());
+}
+
+test "a double click on a unit chooses all of its kind on the screen" {
+    var g = try testGame();
+    defer g.deinit();
+    g.view_size = .{ 1280, 720 };
+    g.closeMenu();
+    // Two more walkers by the base, and one far off the screen.
+    const b = map_mod.bases[me];
+    _ = g.world.add(.{ .kind = .walker, .team = me, .pos = .{ b[0] + 2, 0, b[1] - 3 } }).?;
+    const far = g.world.add(.{ .kind = .walker, .team = me, .pos = .{ b[0] + 120, 0, b[1] } }).?;
+    var walker: ?usize = null;
+    for (g.world.all(), 0..) |t, i| if (t.kind == .walker and i != far) {
+        walker = i;
+        break;
+    };
+    const at = g.onView(g.world.things[walker.?].pos + V3{ 0, 0.5, 0 });
+    try testing.expect(g.chooseAllLike(at));
+    var walkers: usize = 0;
+    for (g.chosen.items) |i| {
+        try testing.expectEqual(units.Kind.walker, g.world.things[i].kind);
+        try testing.expect(i != far);
+        walkers += 1;
+    }
+    try testing.expect(walkers >= 2);
+    // The ground: not a double click on anything.
+    try testing.expect(!g.chooseAllLike(.{ 5, 700 }));
 }
 
 test "F: the view follows what is chosen, until it is moved" {
