@@ -233,11 +233,11 @@ pub const State = struct {
         var lib = try std.DynLib.open("libvulkan.so.1");
         errdefer lib.close();
         const get_inst = lib.lookup(GetInstanceProcAddr, "vkGetInstanceProcAddr") orelse return error.NoVulkan;
-        const get_dev: GetDeviceProcAddr = @ptrCast(get_inst(shared.instance, "vkGetDeviceProcAddr") orelse return error.NoVulkan);
+        const get_dev: GetDeviceProcAddr = @ptrCast(@alignCast(get_inst(shared.instance, "vkGetDeviceProcAddr") orelse return error.NoVulkan));
         var f: Procs = undefined;
         inline for (@typeInfo(Procs).@"struct".field_names) |name| {
             const p = get_dev(shared.device, "vk" ++ name) orelse return error.NoVulkan;
-            @field(f, name) = @ptrCast(p);
+            @field(f, name) = @ptrCast(@alignCast(p));
         }
         const s = try gpa.create(State);
         errdefer gpa.destroy(s);
