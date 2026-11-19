@@ -21,12 +21,22 @@ const view = @import("view.zig");
 const units = @import("units.zig");
 const sky = @import("sky.zig");
 const combat = @import("combat.zig");
+const gpu = @import("gpu.zig");
+const platform = @import("platform").platform;
+const on_linux = @import("linux.zig");
 
 const print = sys.print;
-const Renderer = renderer_mod.Renderer(vc4.Device);
+pub const Renderer = renderer_mod.Renderer(gpu.Device);
 const V3 = math.V3;
 
 pub fn main(init: std.process.Init) u8 {
+    if (platform == .linux) {
+        on_linux.run(init) catch |err| {
+            print("overrun: error: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        return 0;
+    }
     sys.logToKmsgIfStderr();
     run(init) catch |err| {
         print(sys.log_error ++ "overrun: error: {s}\n", .{@errorName(err)});
@@ -43,11 +53,20 @@ const Scene = struct {
     /// is.
     window_renderer: *const kete_vc4.Renderer,
 
-    fn draw(ctx: *anyopaque, f: *vc4.render.Frame, area: kete.gfx.GpuArea) anyerror!void {
+    fn draw(ctx: *anyopaque, f: *gpu.Frame, area: kete.gfx.GpuArea) anyerror!void {
         const s: *Scene = @ptrCast(@alignCast(ctx));
-        const g = s.game;
         const vp = s.window_renderer.scaled(area.viewport);
         const scissor = if (area.scissor) |sc| s.window_renderer.scaled(sc) else null;
+        try drawBattlefield(s.game, s.renderer, renderer_mod.FrameSink{ .frame = f }, vp, scissor);
+    }
+};
+
+/// Draws the battlefield as `g` has it into `sink` (`vp`, within
+/// `scissor`): the ground, and the units, buildings and fighting made
+/// into `renderer`'s buffer for them.
+pub inline fn drawBattlefield(g: *game_mod.Game, renderer: *Renderer, sink: anytype, vp: gpu.Viewport, scissor: ?gpu.Viewport) !void {
+    const s = .{ .renderer = renderer };
+    {
         const aspect = @as(f32, @floatFromInt(vp.width)) / @as(f32, @floatFromInt(@max(vp.height, 1)));
         const m = g.camera.viewProjection(aspect);
         if (g.view_jumped) {
@@ -135,13 +154,13 @@ const Scene = struct {
         const time = g.world.time;
         const weather = sky.weatherAt(g.map.seed, time);
         sky.rain(&b, g.camera, aspect, 2 * g.camera.zoom / @as(f32, @floatFromInt(@max(vp.height, 1))), time, weather.rain);
-        try s.renderer.draw(renderer_mod.FrameSink{ .frame = f }, vp, scissor, .{
+        try s.renderer.draw(sink, vp, scissor, .{
             .vp = m,
             .ground = g.camera.groundBox(aspect, map_mod.lowest, map_mod.highest + map_mod.tallest_tree),
             .tint = sky.tintAt(g.map.seed, time, weather),
         }, b.n);
     }
-};
+}
 
 /// The window's root: the battlefield and what is over it.
 const Root = struct {
@@ -238,6 +257,7 @@ fn run(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("gpu.zig");
     _ = @import("math.zig");
     _ = @import("mesh.zig");
     _ = @import("map.zig");

@@ -7,6 +7,7 @@ const std = @import("std");
 const kete = @import("kete");
 const gfx = kete.gfx;
 const vc4 = @import("vc4");
+const platform = @import("platform").platform;
 const game_mod = @import("game.zig");
 const units = @import("units.zig");
 const minimap = @import("minimap.zig");
@@ -27,7 +28,11 @@ const button_size = 40;
 /// Draws the battlefield into the frame.
 pub const Draw = struct {
     ctx: *anyopaque,
-    f: *const fn (ctx: *anyopaque, frame: *vc4.render.Frame, area: kete.gfx.GpuArea) anyerror!void,
+    f: *const fn (ctx: *anyopaque, frame: *Frame, area: kete.gfx.GpuArea) anyerror!void,
+
+    /// What it draws into: on Dazzle, the window's frame being recorded;
+    /// on Linux, the window's Vulkan frame (kete's), drawn into directly.
+    pub const Frame = if (platform == .linux) kete.gfx.vulkan.DirectFrame else vc4.render.Frame;
 };
 
 pub const Overrun = struct {
@@ -455,14 +460,30 @@ const Battlefield = struct {
         return size;
     }
 
-    pub fn paint(self: *const Battlefield, _: *kete.WidgetNode, p: *kete.Painter) void {
-        if (self.draw != null) p.gpu(self, drawWorld);
+    pub fn paint(self: *const Battlefield, n: *kete.WidgetNode, p: *kete.Painter) void {
+        if (self.draw != null) {
+            if (platform == .linux) p.gpuWithDirect(.{ .fills = true }, self, drawNothing, drawDirect) else p.gpu(self, drawWorld);
+        }
+        // (On Dazzle, the host draws a frame each time round; on Linux,
+        // kete draws when asked.)
+        if (platform == .linux) n.ui.needs_frame = true;
     }
 
     fn drawWorld(self: *const Battlefield, frame: *vc4.render.Frame, area: kete.gfx.GpuArea) anyerror!void {
         const d = self.draw.?;
         try d.f(d.ctx, frame, area);
     }
+
+    /// On Linux, into the window's frame on its GPU (with Vulkan); with
+    /// anything else, the battlefield is not drawn.
+    fn drawDirect(self: *const Battlefield, backend: kete.gfx.RenderBackend, frame: *const anyopaque, area: kete.gfx.GpuArea) anyerror!bool {
+        if (backend != .vulkan) return false;
+        const d = self.draw.?;
+        try d.f(d.ctx, @ptrCast(@alignCast(@constCast(frame))), area);
+        return true;
+    }
+
+    fn drawNothing(_: *const Battlefield, _: *anyopaque, _: kete.gfx.GpuArea) anyerror!void {}
 
     pub fn event(self: *const Battlefield, _: *kete.WidgetNode, e: kete.Event) bool {
         const g = self.game;

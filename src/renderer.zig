@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const vc4 = @import("vc4");
-const shader = @import("shader");
+const gpu = @import("gpu.zig");
 const math = @import("math.zig");
 const mesh = @import("mesh.zig");
 const map_mod = @import("map.zig");
@@ -62,7 +62,7 @@ pub const Stats = struct {
 /// A chunk of ground: its triangles on the GPU (if it is in view, or was
 /// lately), and how high it goes (for knowing if it is in view).
 const Chunk = struct {
-    bo: ?vc4.Bo = null,
+    bo: ?gpu.Buffer = null,
     count: u32 = 0,
     /// As low and high as it can be, until its heights are made.
     lo: f32 = @min(map_mod.lowest, map_mod.water_level),
@@ -83,7 +83,7 @@ pub fn Renderer(comptime Device: type) type {
 
         gpa: std.mem.Allocator,
         dev: Device,
-        flat: shader.Pipeline,
+        flat: gpu.Pipeline,
         map: *const Map,
         chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk,
         /// The chunks on the GPU.
@@ -94,18 +94,21 @@ pub fn Renderer(comptime Device: type) type {
         /// after the view jumps: see `makeAllNow`).
         all_now: bool = true,
         /// The fog of war's picture, and which of its versions it has.
-        fog: vc4.Bo,
+        fog: Fog,
         fog_version: ?u32 = null,
+        /// With Vulkan: the picture as a texture's pixels (RGBA, the fog's
+        /// lightness in A), made each time it changes.
+        fog_pixels: if (gpu.vulkan) []u32 else void,
         /// The units' and buildings' vertices, two buffers in turn (one may
         /// still be being drawn while the next is made).
-        dynamic: [2]vc4.Bo,
+        dynamic: [2]gpu.Buffer,
         which: u1 = 0,
         stats: Stats = .{},
 
         pub fn init(gpa: std.mem.Allocator, dev: Device, m: *const Map) !*Self {
             const r = try gpa.create(Self);
             errdefer gpa.destroy(r);
-            var flat = try shader.Pipeline.init(gpa, dev, shader.Program.decode(@embedFile("flat.shader")) catch unreachable, .{
+            var flat = try gpu.Pipeline.init(gpa, dev, gpu.shader("flat"), .{
                 .vertex_stride = @sizeOf(Vertex),
                 .attributes = &.{ .{ .location = 0, .offset = 0 }, .{ .location = 1, .offset = 12 } },
                 .cull = .back,
@@ -115,12 +118,18 @@ pub fn Renderer(comptime Device: type) type {
             const chunks: [map_mod.chunks_x * map_mod.chunks_z]Chunk = @splat(.{});
             const scratch = try gpa.alloc(Vertex, Map.chunk_vertices);
             errdefer gpa.free(scratch);
-            const fog = try dev.createBo(vc4.texture.imageSizeOf(.a8, fog_mod.size, fog_mod.size));
-            errdefer dev.destroyBo(fog);
+            const fog_pixels = if (gpu.vulkan) try gpa.alloc(u32, fog_mod.size * fog_mod.size) else {};
+            errdefer if (gpu.vulkan) gpa.free(fog_pixels);
+            if (gpu.vulkan) @memset(fog_pixels, 0);
+            const fog = if (gpu.vulkan)
+                try dev.createTexture(fog_pixels, fog_mod.size, fog_mod.size, 0, .{ .mip_linear = false })
+            else
+                try dev.createBo(vc4.texture.imageSizeOf(.a8, fog_mod.size, fog_mod.size));
+            errdefer if (gpu.vulkan) dev.destroyTexture(fog) else dev.destroyBo(fog);
             const d0 = try dev.createBo(max_dynamic * @sizeOf(Vertex));
             errdefer dev.destroyBo(d0);
             const d1 = try dev.createBo(max_dynamic * @sizeOf(Vertex));
-            r.* = .{ .gpa = gpa, .dev = dev, .flat = flat, .map = m, .chunks = chunks, .scratch = scratch, .fog = fog, .dynamic = .{ d0, d1 } };
+            r.* = .{ .gpa = gpa, .dev = dev, .flat = flat, .map = m, .chunks = chunks, .scratch = scratch, .fog = fog, .fog_pixels = fog_pixels, .dynamic = .{ d0, d1 } };
             return r;
         }
 
@@ -130,7 +139,10 @@ pub fn Renderer(comptime Device: type) type {
             r.kept.deinit(r.gpa);
             r.gpa.free(r.scratch);
             for (r.dynamic) |bo| r.dev.destroyBo(bo);
-            r.dev.destroyBo(r.fog);
+            if (gpu.vulkan) {
+                r.dev.destroyTexture(r.fog);
+                r.gpa.free(r.fog_pixels);
+            } else r.dev.destroyBo(r.fog);
             r.gpa.destroy(r);
         }
 
@@ -144,7 +156,11 @@ pub fn Renderer(comptime Device: type) type {
         /// changed).
         pub fn setFog(r: *Self, f: *const fog_mod.Fog) void {
             if (r.fog_version == f.version) return;
-            vc4.texture.uploadRectOf(.a8, r.fog.map, fog_mod.size, fog_mod.size, .{ .x = 0, .y = 0, .width = fog_mod.size, .height = fog_mod.size }, &f.light, fog_mod.size);
+            if (gpu.vulkan) {
+                // Its lightness in A (as the shader reads it).
+                for (r.fog_pixels, f.light) |*px, l| px.* = @as(u32, l) << 24;
+                r.dev.updateTexture(r.fog, r.fog_pixels, fog_mod.size, fog_mod.size) catch return;
+            } else vc4.texture.uploadRectOf(.a8, r.fog.map, fog_mod.size, fog_mod.size, .{ .x = 0, .y = 0, .width = fog_mod.size, .height = fog_mod.size }, &f.light, fog_mod.size);
             r.fog_version = f.version;
         }
 
@@ -157,12 +173,12 @@ pub fn Renderer(comptime Device: type) type {
 
         /// Draws the ground in view, and `dynamic` vertices of the buffer
         /// `dynamicVertices` gave, as `look` says.
-        pub fn draw(r: *Self, sink: anytype, viewport: vc4.render.Viewport, scissor: ?vc4.render.Viewport, look: Look, dynamic: usize) !void {
+        pub fn draw(r: *Self, sink: anytype, viewport: gpu.Viewport, scissor: ?gpu.Viewport, look: Look, dynamic: usize) !void {
             const vp = look.vp;
             const ground = look.ground;
             r.stats = .{};
             const u: Uniforms = .{
-                .mvp = vp,
+                .mvp = gpu.clip(vp),
                 .tint = .{ look.tint[0], look.tint[1], look.tint[2], 1 },
                 .fog = .{ 1 / fog_mod.span, -fog_mod.origin / fog_mod.span, 0, 0 },
             };
@@ -228,7 +244,7 @@ pub fn Renderer(comptime Device: type) type {
             c.count = 0;
         }
 
-        fn drawRange(r: *Self, sink: anytype, handle: u32, first: u32, count: u32, viewport: vc4.render.Viewport, scissor: ?vc4.render.Viewport) !void {
+        fn drawRange(r: *Self, sink: anytype, handle: u32, first: u32, count: u32, viewport: gpu.Viewport, scissor: ?gpu.Viewport) !void {
             var done: u32 = 0;
             while (done < count) {
                 const n = @min(count - done, max_per_draw);
@@ -238,7 +254,7 @@ pub fn Renderer(comptime Device: type) type {
                     .vertices = handle,
                     .vertex_offset = (first + done) * @sizeOf(Vertex),
                     .count = n,
-                    .texture = .{ .handle = r.fog.handle, .config = fog_config },
+                    .texture = if (gpu.vulkan) r.fog else .{ .handle = r.fog.handle, .config = fog_config },
                     .viewport = viewport,
                     .scissor = scissor,
                 });
@@ -249,6 +265,10 @@ pub fn Renderer(comptime Device: type) type {
         }
     };
 }
+
+/// The fog's picture: a buffer of it (on Dazzle, sampled as `fog_config`
+/// says), or a texture (with Vulkan).
+const Fog = if (gpu.vulkan) gpu.Texture else gpu.Buffer;
 
 /// The chunks (from, to: across and down) under `ground` (from (x, z), to
 /// (x, z)), `past` blocks further each way, on the map.
@@ -283,13 +303,14 @@ pub fn inView(vp: math.Mat4, lo: V3, hi: V3) bool {
 
 /// Where draws go: into a frame.
 pub const FrameSink = struct {
-    frame: *vc4.render.Frame,
+    frame: *gpu.Frame,
 
     pub fn hasRoom(s: FrameSink, uniform_words: usize) bool {
+        if (gpu.vulkan) return true;
         return s.frame.hasRoom(uniform_words);
     }
 
-    pub fn draw(s: FrameSink, p: *shader.Pipeline, d: shader.Pipeline.Draw) !void {
+    pub fn draw(s: FrameSink, p: *gpu.Pipeline, d: gpu.Pipeline.Draw) !void {
         try p.draw(s.frame, d);
     }
 };
