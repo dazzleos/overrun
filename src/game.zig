@@ -86,6 +86,9 @@ pub const Game = struct {
     /// Where units were last sent, and when (a mark shows there a while).
     sent: ?struct { at: V3, time: f32 } = null,
     menu_open: bool = true,
+    /// The last input was a touch (not a key or a mouse's button): with
+    /// no keyboard for Esc, a button opens the menu.
+    touch_input: bool = false,
     menu_tab: MenuTab = .game,
     /// Asked to quit.
     quit_asked: bool = false,

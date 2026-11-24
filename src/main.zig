@@ -177,6 +177,17 @@ const Input = struct {
     game: *game_mod.Game,
 
     fn filter(in: *Input, e: kete.window.InputEvent) bool {
+        // A touch, or a key or a mouse's button: which was used last.
+        switch (e) {
+            .touch_down => in.game.touch_input = true,
+            .key => |k| if (k.pressed) {
+                in.game.touch_input = false;
+            },
+            .button => |b| if (b.pressed) {
+                in.game.touch_input = false;
+            },
+            else => {},
+        }
         switch (e) {
             .key => |k| {
                 in.game.key(k.key, k.pressed);

@@ -46,7 +46,14 @@ pub const Overrun = struct {
         var layers: std.ArrayList(kete.Widget) = .empty;
         layers.append(a, cx.make(Battlefield{ .game = g, .draw = self.draw })) catch {};
         if (g.dragBox() != null) layers.append(a, cx.make(DragBox{ .game = g })) catch {};
-        layers.append(a, cx.make(kete.Align{ .alignment = .top_left, .child = cx.make(kete.Padding{ .padding = .all(12), .child = resources(cx, g) }) })) catch {};
+        // Top left: what there is; touched (with no keyboard for Esc, no
+        // window controls in fullscreen), a button before it opens the
+        // menu.
+        const top_left = if (!g.menu_open and g.touch_input) cx.make(kete.Row{ .fill = false, .spacing = 8, .cross_axis_alignment = .center, .children = a.dupe(kete.Widget, &.{
+            cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(@as(f32, button_size) / 2), .child = cx.make(kete.IconButton{ .size = button_size, .icon = .menu, .on_press = .of(g, Game.openMenu) }) }),
+            resources(cx, g),
+        }) catch &.{} }) else resources(cx, g);
+        layers.append(a, cx.make(kete.Align{ .alignment = .top_left, .child = cx.make(kete.Padding{ .padding = .all(12), .child = top_left }) })) catch {};
         if (!g.menu_open) layers.append(a, cx.make(kete.Align{ .alignment = .top_right, .child = cx.make(kete.Padding{ .padding = .all(12), .child = cx.make(Minimap{ .game = g }) }) })) catch {};
         if (!g.menu_open and g.following) layers.append(a, cx.make(kete.Align{ .alignment = .top_center, .child = cx.make(kete.Padding{ .padding = .all(12), .child = cx.make(kete.RoundedBox{ .color = panel_bg, .radius = .all(10), .child = cx.make(kete.Padding{ .padding = .{ .left = 14, .top = 6, .right = 14, .bottom = 6 }, .child = label(cx, "Following (F to stop)", 15) }) }) }) })) catch {};
         if (!g.menu_open) if (chosenPanel(cx, g)) |p| layers.append(a, cx.make(kete.Align{ .alignment = .bottom_center, .child = cx.make(kete.Padding{ .padding = .all(14), .child = p }) })) catch {};
@@ -268,7 +275,7 @@ fn kindCell(cx: *kete.BuildContext, k: Kind, on: bool, active: bool, note: []con
 
 // The icons chosen at run time (`iconOf`, and the window buttons').
 comptime {
-    _ = &[_]kete.IconName{ .shield, .connecting_airports, .battery_charging_full, .build, .rocket, .rocket_launch, .my_location, .local_airport, .airplanemode_active, .radar, .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close };
+    _ = &[_]kete.IconName{ .shield, .connecting_airports, .battery_charging_full, .build, .rocket, .rocket_launch, .my_location, .local_airport, .airplanemode_active, .radar, .front_loader, .flight_takeoff, .bolt, .diamond, .security, .factory, .wb_sunny, .nights_stay, .cloud, .water_drop, .thunderstorm, .smart_toy, .local_shipping, .flight, .construction, .fullscreen, .fullscreen_exit, .close, .menu };
 }
 
 fn iconOf(k: Kind) @FieldType(kete.Icon, "icon") {
@@ -662,6 +669,39 @@ test "the view fits, menu or not, from the smallest window up" {
             }
         }
     }
+}
+
+test "touched, a button top left opens the menu" {
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &f);
+    defer u.destroy();
+    var g = try Game.init(testing.allocator, 1);
+    defer g.deinit();
+    g.closeMenu();
+    const view: Overrun = .{ .game = &g };
+    const Find = struct {
+        fn menuButton(n: *kete.WidgetNode) ?*kete.WidgetNode {
+            if (n.widget.as(kete.IconButton)) |b| if (b.icon == .menu) return n;
+            for (n.children.items) |ch| if (menuButton(ch)) |m| return m;
+            return null;
+        }
+    };
+    // With a keyboard or a mouse: none.
+    u.frame(1280, 720, 0, view);
+    try testing.expect(Find.menuButton(u.root.?) == null);
+    g.touch_input = true;
+    u.frame(1280, 720, 1, view);
+    const btn = Find.menuButton(u.root.?).?;
+    const at = btn.position();
+    try testing.expect(at[0] < 100 and at[1] < 100);
+    const p: kete.Point = .{ at[0] + btn.size.w / 2, at[1] + btn.size.h / 2 };
+    u.pointerMotion(p);
+    u.pointerButton(p, .left, true);
+    u.pointerButton(p, .left, false);
+    try testing.expect(g.menu_open);
+    u.frame(1280, 720, 2, view);
+    try testing.expect(Find.menuButton(u.root.?) == null);
+    try testing.expect(!overflows(u.root.?));
 }
 
 test "dragging with the right button moves the view" {
