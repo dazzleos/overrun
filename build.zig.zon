@@ -8,8 +8,8 @@
         // is built with. To build with a Dazzle checkout beside it instead:
         // `zig build --fork=../dazzle`.
         .dazzle = .{
-            .url = "git+https://github.com/dazzleos/dazzle#056e3e6ec7c7ccb933e291b6e7a68b216669313e",
-            .hash = "dazzle-0.0.0-ze61IH8jzAC6yEaMr1VfENiCxPxvGvNNOSy4s0AxFnsS",
+            .url = "git+https://github.com/dazzleos/dazzle#330825a60e55e758245d6aff7ec6f5a97d048d9b",
+            .hash = "dazzle-0.0.0-ze61IFSusQAVknwzelwRMaVg-gUPgLZxAn45wDPA6Ra6",
         },
     },
     .paths = .{
